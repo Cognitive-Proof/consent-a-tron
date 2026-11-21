@@ -133,7 +133,7 @@ const PRODUCTS: Product[] = [
       "ID validated against records",
       "Code sent to your address of record",
       "Ed25519 key held in your wallet",
-      "Listed in the TRQP trust registry",
+      "Can apply to the guild's TRQP trust registry",
     ],
     href: ENROLL,
     cta: "Get started",
@@ -262,7 +262,7 @@ function Features() {
   const features = [
     ["🔑", "Your key stays yours", "Keys are created in your wallet and can't be exported. We only ever see the public key."],
     ["🧾", "Built for C2PA", "Sign CAWG identity assertions inside content credentials on images and video."],
-    ["🏛️", "Trust registry", "Certificate holders are listed in a TRQP registry, so verifiers know who may issue consent."],
+    ["🏛️", "Trust registry", "Producers approved by the guild are listed in a TRQP registry, so verifiers know who may issue consent."],
     ["↩️", "Withdraw any time", "Consent can be withdrawn through status lists, without touching the file."],
     ["⚡", "Fast issuance", "Most certificates are issued in under five minutes."],
     ["🛟", "Real humans*", "*Not real. This is a demonstration."],

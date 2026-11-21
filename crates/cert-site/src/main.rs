@@ -9,9 +9,10 @@
 //! → Ed25519 leaf certificate from the CAWG test CA, with the verified email
 //! as its rfc822Name SAN.
 //!
-//! Also hosts the mock TRQP registry for the guild's governance framework:
-//! every certificate holder is authorized to issue consent credentials, and
-//! Consent-o-tron's service key to publish their status lists.
+//! Also hosts the mock TRQP registry for the guild's governance framework,
+//! which authorizes Consent-o-tron's service key to publish status lists.
+//! A certificate alone doesn't authorize issuing consent credentials: that
+//! permission is granted by the guild.
 //!
 //! State lives in MongoDB (`enrollments`, `identity_records`,
 //! `trqp_authorizations`, `outbox`).
@@ -892,9 +893,6 @@ async fn issue_certificate(State(app): State<App>, UrlPath(id): UrlPath<String>,
 
     let chain = issue(&app.root, &key_bytes, &email)?;
     set(&app, &id, doc! { "cert_chain_pem": &chain, "did": &proof.did }).await?;
-    // Every certificate holder may ask for consent. A guild would decide this
-    // itself; the demo has no approval step, so issuance grants it.
-    authorize(&app.registry, &proof.did, "issue").await?;
     Ok(Json(json!({ "certChainPem": chain, "email": email, "issuer": "Test CAWG Root" })))
 }
 
