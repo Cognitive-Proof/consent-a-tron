@@ -240,6 +240,8 @@ pub fn validate_schema(schema_dir: &Path, credential: &Value) -> Result<Vec<Stri
 
 // ---------------------------------------------------------------- credential
 
+/// Governance framework and registry the command-line tools use; the demo
+/// sites use the trust registry service's did:web authority instead.
 pub const GOVERNANCE_FRAMEWORK: &str = "https://guild.example/gf/likeness-consent/v1";
 pub const TRUST_REGISTRY: &str = "https://trqp.guild.example";
 
@@ -254,6 +256,10 @@ pub struct CredentialParams<'a> {
     pub industry_schema_id: &'a str,
     pub status_list_url: &'a str,
     pub status_index: usize,
+    /// TRQP `authority_id` of the governance framework issuers are authorized under.
+    pub governance_framework: &'a str,
+    /// Where that framework's trust registry answers TRQP queries.
+    pub trust_registry: &'a str,
     /// Public terms, as defined by the industry schema.
     pub consent: Value,
     /// Private agreement; only its salted digest goes in the credential.
@@ -281,7 +287,7 @@ pub fn build_credential(p: &CredentialParams) -> Result<Value> {
             "statusListIndex": p.status_index.to_string(),
             "statusListCredential": p.status_list_url
         },
-        "governanceFramework": { "id": GOVERNANCE_FRAMEWORK, "trustRegistry": TRUST_REGISTRY },
+        "governanceFramework": { "id": p.governance_framework, "trustRegistry": p.trust_registry },
         "credentialSubject": {
             "id": p.subject_id,
             "consentDomain": "identity",

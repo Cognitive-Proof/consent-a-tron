@@ -32,9 +32,11 @@
 
 body.cert { --accent: #0c8599; }
 body.consent { --accent: #c2255c; }
+body.registry { --accent: #6741d9; }
 @media (prefers-color-scheme: dark) {
   body.cert { --accent: #3bc9db; }
   body.consent { --accent: #f783ac; }
+  body.registry { --accent: #b197fc; }
 }
 
 * { box-sizing: border-box; }

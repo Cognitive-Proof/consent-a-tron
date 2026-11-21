@@ -9,10 +9,8 @@
 //! → Ed25519 leaf certificate from the CAWG test CA, with the verified email
 //! as its rfc822Name SAN.
 //!
-//! Also hosts the mock TRQP registry for the guild's governance framework,
-//! which authorizes Consent-o-tron's service key to publish status lists.
 //! A certificate alone doesn't authorize issuing consent credentials: that
-//! permission is granted by the guild.
+//! permission is granted by the guild's trust registry (registry/).
 //!
 //! State lives in MongoDB (`enrollments`, `identity_records`,
 //! `trqp_authorizations`, `outbox`).
@@ -31,10 +29,10 @@ use axum::{
     Form, Json, Router,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
-use cawg_consent_test::{did_key, ed25519_spki_der, load_ed25519_pem, pki, sha256_b64, uuid_v4, GOVERNANCE_FRAMEWORK};
+use cawg_consent_test::{did_key, ed25519_spki_der, pki, sha256_b64, uuid_v4};
 use demo_common::{
     esc,
-    mongodb::{bson::doc, options::UpdateOptions, Collection},
+    mongodb::{bson::doc, Collection},
     Mailer, CERT_SITE,
 };
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
@@ -43,7 +41,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tower_http::services::{ServeDir, ServeFile};
 
-const CREDENTIAL_TYPE: &str = "ExampleGuildLikenessConsentCredential";
 const PRICE_CENTS: u32 = 500;
 
 #[derive(Serialize, Deserialize)]
@@ -133,22 +130,11 @@ fn mask_email(email: &str) -> String {
     }
 }
 
-/// One TRQP authorization: entity may perform action on resource under authority.
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
-struct Authorization {
-    entity_id: String,
-    authority_id: String,
-    action: String,
-    resource: String,
-    authorized: bool,
-}
-
 #[derive(Clone)]
 struct App {
     root: PathBuf,
     enrollments: Collection<Enrollment>,
     records: Collection<IdentityRecord>,
-    registry: Collection<Authorization>,
     mailer: Mailer,
     stripe_key: Option<String>,
     http: reqwest::Client,
@@ -185,15 +171,11 @@ async fn main() -> anyhow::Result<()> {
     let app = App {
         enrollments: db.collection("enrollments"),
         records: db.collection("identity_records"),
-        registry: db.collection("trqp_authorizations"),
         mailer: Mailer::new("cert-site", &db),
         root,
         stripe_key,
         http: reqwest::Client::new(),
     };
-    // Consent-o-tron's service key may publish status lists for the guild type.
-    let service = load_ed25519_pem(&pki(&app.root, "consent-o-tron.key")?)?;
-    authorize(&app.registry, &did_key(&service.verifying_key()), "publish-status").await?;
 
     let router = Router::new()
         .route("/", get(web_index))
@@ -210,7 +192,6 @@ async fn main() -> anyhow::Result<()> {
         .route("/enroll/{id}/code/resend", post(resend_code))
         .route("/enroll/{id}/certificate", post(issue_certificate))
         .route("/enroll/{id}/certificate.pem", get(certificate_pem))
-        .route("/trqp/registry", get(registry))
         .route("/records", get(records_page).post(create_record))
         .route("/outbox", get(outbox))
         .route("/static/notssl.css", get(style_css))
@@ -226,26 +207,6 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(demo_common::listen_addr(4001)).await?;
     axum::serve(listener, router).await?;
     Ok(())
-}
-
-// ------------------------------------------------------------------ registry
-
-async fn authorize(registry: &Collection<Authorization>, did: &str, action: &str) -> anyhow::Result<()> {
-    let key = doc! { "entity_id": did, "authority_id": GOVERNANCE_FRAMEWORK, "action": action, "resource": CREDENTIAL_TYPE };
-    registry
-        .update_one(key, doc! { "$set": { "authorized": true } })
-        .with_options(UpdateOptions::builder().upsert(true).build())
-        .await?;
-    Ok(())
-}
-
-/// The registry in the shape the verifier's mock TRQP query reads.
-async fn registry(State(app): State<App>) -> AppResult<Json<Value>> {
-    let entries: Vec<Authorization> = app.registry.find(doc! {}).await?.try_collect().await?;
-    Ok(Json(json!({
-        "_note": "Mock TRQP registry for the guild governance framework, operated by the Certificate site.",
-        "authorizations": entries
-    })))
 }
 
 async fn outbox(State(app): State<App>) -> AppResult<Html<String>> {

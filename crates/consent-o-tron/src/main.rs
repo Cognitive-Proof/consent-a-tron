@@ -35,7 +35,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use cawg_consent_test::{
     add_proof, build_credential, build_status_list, did_key, did_of_vm, load_ed25519_pem, now, pki, resolve_did_key, sha256_b64,
     uuid_v4,
-    verify::{verify_asset, Inputs, Report},
+    verify::{verify_asset, Inputs, Report, TrqpQuery, TrqpQuestion},
     verify_cert_chain, verify_proofs, CredentialParams,
 };
 use demo_common::{
@@ -45,7 +45,7 @@ use demo_common::{
         options::{FindOneAndUpdateOptions, ReturnDocument},
         Collection,
     },
-    script_json, Blobs, Mailer, Site, CERT_SITE, CONSENT_SITE,
+    registry_authority, script_json, Blobs, Mailer, Site, CERT_SITE, CONSENT_SITE, REGISTRY_URL,
 };
 use ed25519_dalek::{Signature, SigningKey, Verifier};
 use futures_util::TryStreamExt;
@@ -592,6 +592,8 @@ async fn create_agreement(
         industry_schema_id: &t.schema_id,
         status_list_url: &status_list_url(),
         status_index: index,
+        governance_framework: &registry_authority(),
+        trust_registry: REGISTRY_URL.get(),
         consent: Value::Object(consent),
         agreement: &agreement_doc,
         salt: &salt,
@@ -1002,17 +1004,38 @@ struct VerifyQuery {
     reveal: Option<String>,
 }
 
-/// Online: the registry from the Certificate site and this site's status
-/// list. Offline: neither.
+/// Online: the guild's trust registry (asked over TRQP) and this site's
+/// status list. Offline: neither.
 async fn verify_inputs(app: &App, offline: bool, agreement: Option<Value>) -> AppResult<Inputs> {
     if offline {
         return Ok(Inputs { agreement, ..Default::default() });
     }
-    let registry = match app.http.get(format!("{CERT_SITE}/trqp/registry")).send().await {
-        Ok(r) => r.json::<Value>().await.ok(),
-        Err(_) => None,
-    };
-    Ok(Inputs { registry, status_list: Some(signed_status_list(app).await?), agreement })
+    Ok(Inputs {
+        trqp: Some(trqp_client(app.http.clone())),
+        trusted_authority: Some(registry_authority()),
+        status_list: Some(signed_status_list(app).await?),
+        agreement,
+    })
+}
+
+/// Asks the trust registry `POST /authorization` (TRQP 2.0), passing the
+/// question's time as `context.time`. The verifier is synchronous, so this
+/// blocks on the async client; it runs on the multi-threaded runtime.
+fn trqp_client(http: reqwest::Client) -> TrqpQuery {
+    let handle = tokio::runtime::Handle::current();
+    Box::new(move |q: &TrqpQuestion| {
+        let mut body = json!({ "entity_id": q.entity_id, "authority_id": q.authority_id, "action": q.action, "resource": q.resource });
+        if let Some(time) = q.time {
+            body["context"] = json!({ "time": time });
+        }
+        let (http, handle) = (http.clone(), handle.clone());
+        tokio::task::block_in_place(move || {
+            handle.block_on(async move {
+                let answer: Value = http.post(format!("{REGISTRY_URL}/authorization")).json(&body).send().await?.error_for_status()?.json().await?;
+                answer["authorized"].as_bool().ok_or_else(|| anyhow!("TRQP response has no authorized field"))
+            })
+        })
+    })
 }
 
 fn report_html(report: &Report) -> String {
