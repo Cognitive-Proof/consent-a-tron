@@ -1,0 +1,27 @@
+{
+  "@context": [
+    "https://www.w3.org/ns/credentials/v2",
+    "https://cawg.io/consent/v1"
+  ],
+  "type": [
+    "VerifiableCredential",
+    "CawgConsentCredential"
+  ],
+  "issuer": "did:key:z6Mkv9btxZKqav9KxoP7J5M4jEGfu73wdTb76xEvKy7dAuZG",
+  "validFrom": "2026-11-20T00:00:00Z",
+  "credentialSubject": {
+    "id": "mailto:alex@example.com",
+    "note": "unicode ✓ and \"quotes\"",
+    "n": 1.5
+  },
+  "proof": [
+    {
+      "type": "DataIntegrityProof",
+      "cryptosuite": "eddsa-jcs-2022",
+      "created": "2026-11-20T00:00:00Z",
+      "verificationMethod": "did:key:z6Mkv9btxZKqav9KxoP7J5M4jEGfu73wdTb76xEvKy7dAuZG#z6Mkv9btxZKqav9KxoP7J5M4jEGfu73wdTb76xEvKy7dAuZG",
+      "proofPurpose": "assertionMethod",
+      "proofValue": "z3dMtmQh25SbzcEvrny1tGTfgJoTZKHKFc4RUe7YMn1afVA9T3ZPPaXKiBLzHv7ZJiE1wCZfmk1AjijEvtGnQUGke"
+    }
+  ]
+}

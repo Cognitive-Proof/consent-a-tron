@@ -1,0 +1,8 @@
+target
+**/node_modules
+wallet/dist
+pki
+data
+out
+.env
+.git

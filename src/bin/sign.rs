@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 use c2pa::{settings::Settings, Builder, BuilderIntent, Context, DigitalSourceType};
-use cawg_consent_test::{c2pa_settings_toml, CONSENT_LABEL};
-use serde_json::{json, Value};
+use cawg_consent_test::{c2pa_settings_toml, manifest_definition};
+use serde_json::Value;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -23,15 +23,7 @@ fn main() -> Result<()> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
 
     let credential: Value = serde_json::from_str(&std::fs::read_to_string(&credential)?)?;
-    let manifest = json!({
-        "claim_generator_info": [{ "name": "cawg-consent-test", "version": env!("CARGO_PKG_VERSION") }],
-        "assertions": [{
-            "label": CONSENT_LABEL,
-            "kind": "Json",
-            "created": true,
-            "data": { "credentials": [credential] }
-        }]
-    });
+    let manifest = manifest_definition(&[credential], "cawg-consent-test");
 
     let settings = Settings::new().with_toml(&c2pa_settings_toml(root, true)?)?;
     let context = Context::new().with_settings(settings)?.into_shared();

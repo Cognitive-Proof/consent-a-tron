@@ -1,0 +1,94 @@
+{
+  "id": "editorial-release",
+  "title": "Editorial photo release",
+  "description": "Use of a person's image and likeness in news and editorial contexts only.",
+  "public": [
+    {
+      "name": "aspects",
+      "label": "What may be used",
+      "type": "multiselect",
+      "options": [
+        "name",
+        "image",
+        "likeness",
+        "voice",
+        "movement",
+        "mannerisms",
+        "persona"
+      ],
+      "default": [
+        "image",
+        "likeness"
+      ]
+    },
+    {
+      "name": "permittedUses",
+      "label": "Permitted uses",
+      "type": "multiselect",
+      "options": [
+        "editorial",
+        "promotional",
+        "commercial",
+        "archival"
+      ],
+      "default": [
+        "editorial"
+      ]
+    },
+    {
+      "name": "aiTraining",
+      "label": "AI training",
+      "type": "select",
+      "options": [
+        "notAllowed",
+        "allowed"
+      ],
+      "default": "notAllowed"
+    },
+    {
+      "name": "digitalReplica",
+      "label": "Digital replica",
+      "type": "select",
+      "options": [
+        "notAllowed",
+        "allowed"
+      ],
+      "default": "notAllowed"
+    },
+    {
+      "name": "territory",
+      "label": "Territory (ISO 3166-1 alpha-2, or WORLD)",
+      "type": "text",
+      "default": "WORLD"
+    }
+  ],
+  "private": [
+    {
+      "name": "engagement",
+      "label": "Engagement",
+      "type": "text",
+      "default": "Photo shoot"
+    },
+    {
+      "name": "fee",
+      "label": "Fee",
+      "type": "text",
+      "default": "500.00"
+    },
+    {
+      "name": "currency",
+      "label": "Currency",
+      "type": "text",
+      "default": "USD"
+    },
+    {
+      "name": "paymentTerms",
+      "label": "Payment terms",
+      "type": "text",
+      "default": "Net 30 from signature"
+    }
+  ],
+  "agreement": "EDITORIAL PHOTO RELEASE\n\nEngagement: {{engagement}}\n\n{{participant}} grants {{producer}} permission to use their {{aspects}} as captured in the attached file, for {{permittedUses}} purposes in {{territory}}.\n\nAI training: {{aiTraining}}. Digital replica: {{digitalReplica}}.\n\nFee: {{fee}} {{currency}}. Payment terms: {{paymentTerms}}.\n\nThe participant may withdraw this consent at any time; withdrawal applies to uses after it is recorded.",
+  "credentialType": "ExampleGuildLikenessConsentCredential",
+  "schemaId": "https://guild.example/consent/schemas/likeness-consent-credential.schema.json"
+}

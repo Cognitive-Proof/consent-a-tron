@@ -16,8 +16,6 @@ use cawg_consent_test::*;
 use rand::RngCore;
 use serde_json::{json, Value};
 
-const GOVERNANCE_FRAMEWORK: &str = "https://guild.example/gf/likeness-consent/v1";
-const TRUST_REGISTRY: &str = "https://trqp.guild.example";
 const STATUS_LIST_URL: &str = "https://status.guild.example/consent/lists/1";
 const CREDENTIAL_TYPE: &str = "ExampleGuildLikenessConsentCredential";
 const STATUS_INDEX: usize = 4_242;
@@ -56,38 +54,25 @@ fn main() -> Result<()> {
     });
     let created = now();
 
-    let mut credential = json!({
-        "@context": ["https://www.w3.org/ns/credentials/v2", "https://cawg.io/consent/v1"],
-        "id": format!("urn:uuid:{}", uuid_v4()),
-        "type": ["VerifiableCredential", "CawgConsentCredential", CREDENTIAL_TYPE],
-        "issuer": requester_did,
-        "validFrom": created,
-        "credentialSchema": [
-            { "id": BASE_SCHEMA_ID, "type": "JsonSchema" },
-            { "id": GUILD_SCHEMA_ID, "type": "JsonSchema" }
-        ],
-        "credentialStatus": {
-            "id": format!("{STATUS_LIST_URL}#{STATUS_INDEX}"),
-            "type": "BitstringStatusListEntry",
-            "statusPurpose": "revocation",
-            "statusListIndex": STATUS_INDEX.to_string(),
-            "statusListCredential": STATUS_LIST_URL
-        },
-        "governanceFramework": { "id": GOVERNANCE_FRAMEWORK, "trustRegistry": TRUST_REGISTRY },
-        "credentialSubject": {
-            "id": participant_did,
-            "consentDomain": "identity",
-            "assetBinding": { "bindingType": "c2pa.hash.data", "alg": "sha256", "hash": asset_hash },
-            "privateTermsDigest": { "alg": "sha256", "digest": private_terms_digest(&salt, &agreement)? },
-            "consent": {
-                "aspects": ["image", "likeness"],
-                "permittedUses": ["editorial", "promotional"],
-                "aiTraining": "notAllowed",
-                "digitalReplica": "notAllowed",
-                "territory": "WORLD"
-            }
-        }
-    });
+    let mut credential = build_credential(&CredentialParams {
+        issuer_did: &requester_did,
+        subject_id: &participant_did,
+        asset_hash_b64: &asset_hash,
+        credential_type: CREDENTIAL_TYPE,
+        industry_schema_id: GUILD_SCHEMA_ID,
+        status_list_url: STATUS_LIST_URL,
+        status_index: STATUS_INDEX,
+        consent: json!({
+            "aspects": ["image", "likeness"],
+            "permittedUses": ["editorial", "promotional"],
+            "aiTraining": "notAllowed",
+            "digitalReplica": "notAllowed",
+            "territory": "WORLD"
+        }),
+        agreement: &agreement,
+        salt: &salt,
+        valid_from: &created,
+    })?;
 
     // Proof set: the requester signs as issuer, then the participant cosigns.
     add_proof(&mut credential, &requester, &created)?;
@@ -98,30 +83,21 @@ fn main() -> Result<()> {
         bail!("credential does not match schema:\n  {}", errors.join("\n  "));
     }
 
-    let mut status_list = json!({
-        "@context": ["https://www.w3.org/ns/credentials/v2"],
-        "id": STATUS_LIST_URL,
-        "type": ["VerifiableCredential", "BitstringStatusListCredential"],
-        "issuer": requester_did,
-        "validFrom": created,
-        "credentialSubject": {
-            "id": format!("{STATUS_LIST_URL}#list"),
-            "type": "BitstringStatusList",
-            "statusPurpose": "revocation",
-            "encodedList": encode_status_list(&[])?
-        }
-    });
+    let mut status_list = build_status_list(STATUS_LIST_URL, &requester_did, &[])?;
     add_proof(&mut status_list, &requester, &created)?;
 
-    let registry = json!({
-        "_note": "Mock TRQP trust registry. In practice the guild operates this under its governance framework.",
-        "authorizations": [{
+    let authorize = |action: &str| {
+        json!({
             "entity_id": requester_did,
             "authority_id": GOVERNANCE_FRAMEWORK,
-            "action": "issue",
+            "action": action,
             "resource": CREDENTIAL_TYPE,
             "authorized": true
-        }]
+        })
+    };
+    let registry = json!({
+        "_note": "Mock TRQP trust registry. In practice the guild operates this under its governance framework.",
+        "authorizations": [authorize("issue"), authorize("publish-status")]
     });
 
     write(&out.join("credential.json"), &credential)?;
@@ -138,13 +114,4 @@ fn main() -> Result<()> {
 
 fn write(path: &Path, value: &Value) -> Result<()> {
     Ok(std::fs::write(path, serde_json::to_string_pretty(value)? + "\n")?)
-}
-
-fn uuid_v4() -> String {
-    let mut b = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut b);
-    b[6] = (b[6] & 0x0f) | 0x40;
-    b[8] = (b[8] & 0x3f) | 0x80;
-    let h = hex::encode(b);
-    format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
 }

@@ -13,7 +13,61 @@ A test implementation of a CAWG consent assertion (`cawg.consent`) that embeds a
   - the participant's key must also be the signer of a `cawg.identity` assertion that lists `cawg.consent` in its referenced assertions.
 - **Issuer trust comes from TRQP.** The credential names a governance framework. The verifier asks its trust registry whether the issuer may issue this credential type.
 
-## Run
+## Demo sites
+
+Three sites show the flow with real people.
+
+| Site | Port | What it does |
+|---|---|---|
+| Certificate site ([crates/cert-site](crates/cert-site/src/main.rs)) | 4001 | Email, then verify link, Stripe test payment, ID and face upload (discarded), and finally an Ed25519 certificate from the CAWG test CA with the verified email. It also hosts the mock TRQP registry: certified producers may `issue`, and Consent-o-tron's key may `publish-status`. |
+| Wallet ([wallet](wallet/src/main.ts)) | 4002 | Static app. It creates non-exportable Ed25519 keys (WebCrypto, IndexedDB), holds certificates, and signs on request. |
+| Consent-o-tron ([crates/consent-o-tron](crates/consent-o-tron/src/main.rs)) | 4003 | The producer picks a template, uploads a JPEG, names the person consenting by email, and signs. The person consenting reviews, consents, and signs their CAWG identity assertion while the file is authored. It also handles withdrawal and verification of any file. |
+
+**How the pieces connect:**
+- **Wallet dialog.** Sites open the wallet in a dialog (an iframe) and talk to it with `postMessage` ([wallet-client.js](crates/demo-common/src/wallet-client.js)). The wallet answers only allow-listed origins.
+- **Same site required.** An embedded wallet can reach its keys only when the wallet and the sites are the same site. `localhost:*` is; in production, use subdomains of one domain, not separate `*.run.app` URLs.
+- **Credential subject.** It is `mailto:<email>`: the producer signs before the person consenting has connected a wallet. The verifier requires the identity signer's certificate to carry that email, and the participant proof to use that certificate's key.
+- **Identity signature.** Consent-o-tron builds the manifest with c2pa-rs. The identity signature comes from a `RawSigner` that waits for the person's wallet ([authoring.rs](crates/consent-o-tron/src/authoring.rs)). The wallet signs only if the bytes reference `cawg.consent`. For the exact assertion hash it relies on Consent-o-tron.
+
+**Storage:**
+- MongoDB holds enrollments, agreements, sessions, the TRQP registry, and sent emails.
+- Files go to a Google Cloud Storage bucket (`GCS_BUCKET`), or to `data/blobs/` locally.
+- Email goes through Resend (`RESEND_API_KEY`). Every email is also listed on each site's `/outbox`.
+
+Run locally:
+
+```bash
+./scripts/make-pki.sh
+```
+
+```bash
+docker compose up -d mongo
+```
+
+```bash
+cp .env.example .env
+```
+
+Then start `cargo run -p cert-site`, `cargo run -p consent-o-tron`, and `npm run dev` in `wallet/` (after `npm install`). Without Stripe or Resend keys, payment is simulated and emails appear only on `/outbox`.
+
+`npm run vector` in `wallet/` regenerates [tests/vectors/js-proof.json](tests/vectors/js-proof.json). [tests/interop.rs](tests/interop.rs) checks that a proof made by the wallet's TypeScript verifies in Rust.
+
+## Deployment (Google Cloud)
+
+Pushes to `main` deploy to the `consent-o-tron` project ([.github/workflows/deploy.yml](.github/workflows/deploy.yml)). GitHub authenticates through Workload Identity Federation, so no keys are stored in GitHub.
+
+| Service | URL | Notes |
+|---|---|---|
+| `cert-site` | https://certs.cognitive-proof.com | |
+| `wallet` | https://wallet.cognitive-proof.com | nginx; only the two sites may frame it |
+| `consent-o-tron` | https://consent.cognitive-proof.com | one instance, CPU always on, for the in-memory wallet hand-off |
+
+- **Data:** Firestore (Enterprise, MongoDB compatible), database `consent-demo`. The connection string is in the `MONGODB_URI` secret. Queries avoid filter-plus-sort combinations, so no composite indexes are needed.
+- **Files:** bucket `gs://consent-o-tron-files`.
+- **PKI:** a separate deployment set of test CAs, in `PKI_*` secrets.
+- **Optional secrets:** add `STRIPE_SECRET_KEY` (sk_test_ only), `RESEND_API_KEY` and `EMAIL_FROM`. The next deploy picks them up.
+
+## Run the command-line test
 
 Needs OpenSSL 3 (Homebrew `openssl@3`), Rust, and network access for the RFC 3161 timestamp.
 

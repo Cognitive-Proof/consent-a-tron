@@ -1,0 +1,18 @@
+{
+  "name": "consent-wallet",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --port 4002 --strictPort",
+    "build": "tsc --noEmit && vite build",
+    "vector": "node scripts/vector.ts"
+  },
+  "dependencies": {
+    "canonicalize": "^2.1.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vite": "^7.2.4"
+  }
+}

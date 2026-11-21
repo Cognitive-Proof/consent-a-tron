@@ -1,0 +1,21 @@
+[package]
+name = "cert-site"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+anyhow = "1"
+axum = { version = "0.8", features = ["multipart"] }
+base64 = "0.22"
+cawg-consent-test = { path = "../.." }
+demo-common = { path = "../demo-common" }
+futures-util = "0.3"
+ed25519-dalek = "2"
+rand = "0.8"
+rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
+reqwest = { version = "0.13", features = ["json", "form"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+time = "0.3"
+tokio = { version = "1", features = ["full"] }

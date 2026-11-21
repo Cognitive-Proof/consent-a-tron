@@ -1,0 +1,20 @@
+server {
+  listen 8080;
+  root /usr/share/nginx/html;
+
+  # Only the demo sites may embed the wallet.
+  add_header Content-Security-Policy "frame-ancestors ${FRAME_ANCESTORS}" always;
+  add_header X-Content-Type-Options nosniff always;
+  add_header Referrer-Policy strict-origin always;
+
+  location /assets/ {
+    add_header Cache-Control "public, max-age=31536000, immutable";
+    add_header Content-Security-Policy "frame-ancestors ${FRAME_ANCESTORS}" always;
+  }
+
+  location / {
+    try_files $uri /index.html;
+    add_header Cache-Control "no-cache";
+    add_header Content-Security-Policy "frame-ancestors ${FRAME_ANCESTORS}" always;
+  }
+}
