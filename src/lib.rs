@@ -468,6 +468,24 @@ referenced_assertions = ["{CONSENT_LABEL}"]
     Ok(toml)
 }
 
+/// The SHA-256 (base64) that a C2PA data hash will record for `asset` once
+/// it is signed: the asset with any existing C2PA manifest store removed.
+/// The upload's own manifest, if any, is replaced by the new store (and
+/// kept as the parent ingredient), so hashing the upload as-is would not
+/// match. `ext` is the file extension c2pa uses to pick a handler, e.g. "jpg".
+pub fn hard_binding_sha256(asset: &[u8], ext: &str) -> Result<String> {
+    if c2pa::jumbf_io::load_jumbf_from_memory(ext, asset).is_err() {
+        return Ok(sha256_b64(asset));
+    }
+    let path = std::env::temp_dir().join(format!("hard-binding-{}.{ext}", uuid_v4()));
+    std::fs::write(&path, asset)?;
+    let stripped = c2pa::jumbf_io::remove_jumbf_from_file(&path)
+        .map_err(anyhow::Error::from)
+        .and_then(|()| Ok(std::fs::read(&path)?));
+    let _ = std::fs::remove_file(&path);
+    Ok(sha256_b64(&stripped?))
+}
+
 pub fn sha256_b64(bytes: &[u8]) -> String {
     STANDARD.encode(Sha256::digest(bytes))
 }
