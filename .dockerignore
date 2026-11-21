@@ -1,6 +1,7 @@
 target
 **/node_modules
 wallet/dist
+crates/cert-site/web/dist
 pki
 data
 out

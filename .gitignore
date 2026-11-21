@@ -5,4 +5,5 @@
 .env
 node_modules/
 /wallet/dist
+/crates/cert-site/web/dist
 .DS_Store
