@@ -33,7 +33,7 @@ use axum::{
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use cawg_consent_test::{
-    add_proof, build_credential, build_status_list, did_key, did_of_vm, load_ed25519_pem, now, pki, resolve_did_key, sha256_b64,
+    add_proof, build_credential, build_status_list, did_key, did_of_vm, hard_binding_sha256, load_ed25519_pem, now, pki, resolve_did_key,
     uuid_v4,
     verify::{verify_asset, Inputs, Report, TrqpQuery, TrqpQuestion},
     verify_cert_chain, verify_proofs, CredentialParams,
@@ -583,7 +583,7 @@ async fn create_agreement(
     let agreement_doc = json!({ "template": t.id, "terms": private, "text": text, "producer": user.email, "participant": cosigner_email });
     let index = next_status_index(&app).await?;
     let subject = format!("mailto:{cosigner_email}");
-    let asset_hash = sha256_b64(&asset);
+    let asset_hash = hard_binding_sha256(&asset, "jpg")?;
     let credential = build_credential(&CredentialParams {
         issuer_did: &user.did,
         subject_id: &subject,

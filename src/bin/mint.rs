@@ -40,9 +40,10 @@ fn main() -> Result<()> {
     let requester_did = did_key(&requester.verifying_key());
     let participant_did = did_key(&participant.verifying_key());
 
-    // For a JPEG, the C2PA data hash excludes only the inserted manifest,
-    // so the hard-binding hash is the hash of the asset as it is now.
-    let asset_hash = sha256_b64(&std::fs::read(&asset)?);
+    // The C2PA data hash excludes the manifest store, so hash the asset as
+    // it will be once any existing manifest is replaced.
+    let ext = asset.extension().and_then(|e| e.to_str()).unwrap_or("jpg").to_lowercase();
+    let asset_hash = hard_binding_sha256(&std::fs::read(&asset)?, &ext)?;
 
     let mut salt = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut salt);
