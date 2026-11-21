@@ -21,7 +21,7 @@ use c2pa::{
         x509::X509CredentialHolder,
     },
     settings::Settings,
-    Builder, BuilderIntent, Context, DigitalSourceType, SigningAlg,
+    Builder, BuilderIntent, Context, SigningAlg,
 };
 use c2pa_raw_crypto::{RawSigner, RawSignerError};
 use cawg_consent_test::{c2pa_settings_toml, manifest_definition, pem_chain_to_der, pki, CONSENT_LABEL};
@@ -92,7 +92,9 @@ pub fn author(root: &Path, asset: &[u8], credential: &Value, cosigner_chain_pem:
     let context = Context::new().with_settings(settings)?.into_shared();
     let definition = manifest_definition(std::slice::from_ref(credential), "consent-o-tron");
     let mut builder = Builder::from_shared_context(&context).with_definition(definition.to_string().as_str())?;
-    builder.set_intent(BuilderIntent::Create(DigitalSourceType::DigitalCapture));
+    // Edit: the upload becomes the parent ingredient (with a c2pa.opened
+    // action), so any Content Credentials it already carries are kept.
+    builder.set_intent(BuilderIntent::Edit);
 
     let claim_key = pki(root, "claim-signer.key")?;
     let claim_chain = pem_chain_to_der(&pki(root, "claim-signer.chain.pem")?)?;
