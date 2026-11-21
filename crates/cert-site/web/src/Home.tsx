@@ -123,24 +123,21 @@ type Product = {
 
 const PRODUCTS: Product[] = [
   {
-    name: "LOA2 CAWG Individual",
+    name: "LOA2 CAWG Certificate",
     tag: "Most popular",
     price: "$5",
     per: "/ year",
-    blurb: "For performers and creators who sign their own identity assertions and give consent.",
-    features: ["Verified email in the certificate", "ID validated against records", "Code sent to your address of record", "Ed25519 key held in your wallet"],
+    blurb: "For performers, creators and producers: sign your identity assertions, give consent, or ask for it.",
+    features: [
+      "Verified email in the certificate",
+      "ID validated against records",
+      "Code sent to your address of record",
+      "Ed25519 key held in your wallet",
+      "Can apply to the guild's TRQP trust registry",
+    ],
     href: ENROLL,
     cta: "Get started",
     featured: true,
-  },
-  {
-    name: "LOA2 CAWG Producer",
-    price: "$5",
-    per: "/ year",
-    blurb: "For producers who ask for consent and issue consent credentials under a governance framework.",
-    features: ["Everything in Individual", "Listed in the TRQP trust registry", "Authorized to issue consent credentials", "Revocation via status lists"],
-    href: ENROLL,
-    cta: "Get started",
   },
   {
     name: "CAWG Organization",
@@ -265,7 +262,7 @@ function Features() {
   const features = [
     ["🔑", "Your key stays yours", "Keys are created in your wallet and can't be exported. We only ever see the public key."],
     ["🧾", "Built for C2PA", "Sign CAWG identity assertions inside content credentials on images and video."],
-    ["🏛️", "Trust registry", "Producers are listed in a TRQP registry, so verifiers know who may issue consent."],
+    ["🏛️", "Trust registry", "Producers approved by the guild are listed in a TRQP registry, so verifiers know who may issue consent."],
     ["↩️", "Withdraw any time", "Consent can be withdrawn through status lists, without touching the file."],
     ["⚡", "Fast issuance", "Most certificates are issued in under five minutes."],
     ["🛟", "Real humans*", "*Not real. This is a demonstration."],
