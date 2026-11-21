@@ -14,6 +14,8 @@ RUN apt-get update \
 COPY --from=build /src/target/release/${BIN} /usr/local/bin/site
 COPY schemas /app/schemas
 COPY templates /app/templates
+# Local file storage when no GCS_BUCKET is set (deployed, files go to the bucket).
+RUN mkdir -p /app/data && chown nobody /app/data
 # PKI material comes from Secret Manager as PKI_* environment variables.
 ENV APP_ROOT=/app
 USER nobody
