@@ -43,6 +43,15 @@ impl std::fmt::Display for EnvUrl {
 pub static WALLET_ORIGIN: EnvUrl = EnvUrl::new("WALLET_URL", "http://localhost:4002");
 pub static CERT_SITE: EnvUrl = EnvUrl::new("CERT_SITE_URL", "http://localhost:4001");
 pub static CONSENT_SITE: EnvUrl = EnvUrl::new("CONSENT_SITE_URL", "http://localhost:4003");
+pub static REGISTRY_URL: EnvUrl = EnvUrl::new("REGISTRY_URL", "http://localhost:4005");
+
+/// The trust registry's TRQP authority: did:web for its host, with any port
+/// percent-encoded, as the registry service derives it.
+pub fn registry_authority() -> String {
+    let url = REGISTRY_URL.get();
+    let host = url.split_once("://").map_or(url, |(_, rest)| rest).split('/').next().unwrap_or_default();
+    format!("did:web:{}", host.replace(':', "%3A"))
+}
 
 /// Where to listen: 0.0.0.0:$PORT when PORT is set (Cloud Run), else
 /// 127.0.0.1 on the site's local port.

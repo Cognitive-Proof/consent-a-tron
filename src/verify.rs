@@ -17,13 +17,31 @@ const CODE: &str = "cawg.consent.credential";
 /// (offline), and the matching check reports `*_unchecked`.
 #[derive(Default)]
 pub struct Inputs {
-    /// TRQP registry for the credential's governance framework.
-    pub registry: Option<Value>,
+    /// Asks the trust registry a TRQP authorization question.
+    pub trqp: Option<TrqpQuery>,
+    /// The governance framework (TRQP `authority_id`) this verifier trusts.
+    /// A credential naming any other framework is not authorized: otherwise
+    /// an issuer could point verifiers at a registry of its own.
+    pub trusted_authority: Option<String>,
     /// The credential's status list credential.
     pub status_list: Option<Value>,
     /// A revealed private agreement (`{ salt, agreement }`), for disputes.
     pub agreement: Option<Value>,
 }
+
+/// One TRQP authorization question.
+pub struct TrqpQuestion<'a> {
+    pub entity_id: &'a str,
+    pub authority_id: &'a str,
+    pub action: &'a str,
+    pub resource: &'a str,
+    /// TRQP `context.time`: answer as of this moment instead of now.
+    pub time: Option<&'a str>,
+}
+
+/// Answers a TRQP authorization question: `Ok(authorized)`, or an error if
+/// the registry could not be asked.
+pub type TrqpQuery = Box<dyn Fn(&TrqpQuestion) -> Result<bool> + Send + Sync>;
 
 #[derive(Serialize)]
 pub struct Report {
@@ -205,12 +223,12 @@ fn check_credential(
         }
     }
 
-    out.push(match &inputs.registry {
-        Some(registry) => check_issuer(registry, credential),
+    out.push(match &inputs.trqp {
+        Some(trqp) => check_issuer(trqp, inputs.trusted_authority.as_deref(), credential),
         None => outcome("issuer_unchecked", true, "offline: TRQP registry not queried"),
     });
-    out.push(match (&inputs.status_list, &inputs.registry) {
-        (Some(list), Some(registry)) => check_status(list, registry, credential)?,
+    out.push(match (&inputs.status_list, &inputs.trqp) {
+        (Some(list), Some(trqp)) => check_status(list, trqp, credential)?,
         _ => outcome(
             "status_unchecked",
             true,
@@ -223,22 +241,31 @@ fn check_credential(
     Ok(out)
 }
 
-/// TRQP: is the issuer authorized under the credential's governance
-/// framework to issue this credential type?
-fn check_issuer(registry: &Value, credential: &Value) -> Outcome {
+/// TRQP: was the issuer authorized under the trusted governance framework to
+/// issue this credential type when the credential was signed (`validFrom`)?
+/// Asking for that time means revoking a producer later doesn't invalidate
+/// consent given while they were authorized.
+fn check_issuer(trqp: &TrqpQuery, trusted: Option<&str>, credential: &Value) -> Outcome {
     let issuer = credential["issuer"].as_str().unwrap_or_default();
     let framework = credential["governanceFramework"]["id"].as_str().unwrap_or_default();
     let ty = industry_type(credential);
-    if trqp_authorized(registry, issuer, framework, "issue", ty) {
-        outcome("issuer_authorized", true, format!("TRQP: authorized to issue {ty} under {framework}"))
-    } else {
-        outcome("issuer_not_authorized", false, format!("TRQP: {issuer} not authorized to issue {ty} under {framework}"))
+    if let Some(trusted) = trusted {
+        if framework != trusted {
+            return outcome("issuer_not_authorized", false, format!("credential names governance framework {framework}; this verifier trusts {trusted}"));
+        }
+    }
+    let signed_at = credential["validFrom"].as_str();
+    let question = TrqpQuestion { entity_id: issuer, authority_id: framework, action: "issue", resource: ty, time: signed_at };
+    match trqp(&question) {
+        Ok(true) => outcome("issuer_authorized", true, format!("TRQP: authorized to issue {ty} under {framework} at {}", signed_at.unwrap_or("now"))),
+        Ok(false) => outcome("issuer_not_authorized", false, format!("TRQP: {issuer} was not authorized to issue {ty} under {framework} at {}", signed_at.unwrap_or("now"))),
+        Err(e) => outcome("issuer_unchecked", false, format!("TRQP registry could not be asked: {e:#}")),
     }
 }
 
 /// The status list must be signed by a party the governance framework
 /// authorizes to publish status for this credential type.
-fn check_status(list: &Value, registry: &Value, credential: &Value) -> Result<Outcome> {
+fn check_status(list: &Value, trqp: &TrqpQuery, credential: &Value) -> Result<Outcome> {
     let entry = &credential["credentialStatus"];
     if list["id"] != entry["statusListCredential"] {
         return Ok(outcome("status_unchecked", false, "status list does not match statusListCredential"));
@@ -247,7 +274,8 @@ fn check_status(list: &Value, registry: &Value, credential: &Value) -> Result<Ou
     let signed = verify_proofs(list)?.iter().any(|p| p.valid && did_of_vm(&p.verification_method) == list_issuer);
     let framework = credential["governanceFramework"]["id"].as_str().unwrap_or_default();
     let ty = industry_type(credential);
-    if !signed || !trqp_authorized(registry, list_issuer, framework, "publish-status", ty) {
+    let question = TrqpQuestion { entity_id: list_issuer, authority_id: framework, action: "publish-status", resource: ty, time: None };
+    if !signed || !trqp(&question).unwrap_or(false) {
         return Ok(outcome("status_unchecked", false, format!("status list signer {list_issuer} is not an authorized status publisher")));
     }
     let index: usize = entry["statusListIndex"].as_str().unwrap_or_default().parse()?;

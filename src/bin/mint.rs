@@ -63,6 +63,8 @@ fn main() -> Result<()> {
         industry_schema_id: GUILD_SCHEMA_ID,
         status_list_url: STATUS_LIST_URL,
         status_index: STATUS_INDEX,
+        governance_framework: GOVERNANCE_FRAMEWORK,
+        trust_registry: TRUST_REGISTRY,
         consent: json!({
             "aspects": ["image", "likeness"],
             "permittedUses": ["editorial", "promotional"],

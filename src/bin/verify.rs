@@ -14,7 +14,11 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context as _, Result};
-use cawg_consent_test::verify::{verify_asset, Inputs};
+use cawg_consent_test::{
+    trqp_authorized,
+    verify::{verify_asset, Inputs, TrqpQuery, TrqpQuestion},
+    GOVERNANCE_FRAMEWORK,
+};
 use serde_json::Value;
 
 fn main() -> Result<()> {
@@ -34,8 +38,17 @@ fn main() -> Result<()> {
         }
     }
 
+    // The registry file stands in for the governance framework's TRQP
+    // registry. It records no grant history, so `time` is not applied.
+    let trqp: Option<TrqpQuery> = if offline {
+        None
+    } else {
+        let registry = read_json(&registry)?;
+        Some(Box::new(move |q: &TrqpQuestion| Ok(trqp_authorized(&registry, q.entity_id, q.authority_id, q.action, q.resource))))
+    };
     let inputs = Inputs {
-        registry: if offline { None } else { Some(read_json(&registry)?) },
+        trqp,
+        trusted_authority: Some(GOVERNANCE_FRAMEWORK.to_string()),
         status_list: if offline { None } else { Some(read_json(&status)?) },
         agreement: agreement.as_deref().map(read_json).transpose()?,
     };
