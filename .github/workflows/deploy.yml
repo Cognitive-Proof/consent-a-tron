@@ -37,9 +37,13 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: wallet/package-lock.json
+          cache-dependency-path: |
+            wallet/package-lock.json
+            crates/cert-site/web/package-lock.json
       - run: npm ci && npm run build
         working-directory: wallet
+      - run: npm ci && npm run build
+        working-directory: crates/cert-site/web
 
   deploy:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'

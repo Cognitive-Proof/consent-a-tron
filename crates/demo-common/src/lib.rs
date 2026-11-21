@@ -252,6 +252,11 @@ impl Mailer {
 
     /// Every email this site sent, newest first.
     pub async fn outbox_page(&self, site: &Site) -> anyhow::Result<Html<String>> {
+        Ok(site.page("Sent emails", &self.outbox_body().await?))
+    }
+
+    /// The outbox list without the page around it, for sites with their own layout.
+    pub async fn outbox_body(&self) -> anyhow::Result<String> {
         // Sorted here rather than in the query, so Firestore needs no composite index.
         let mut emails: Vec<Email> = self.outbox.find(doc! { "site": self.site }).await?.try_collect().await?;
         emails.sort_by(|a, b| b.at.cmp(&a.at));
@@ -280,10 +285,7 @@ impl Mailer {
         } else {
             "RESEND_API_KEY is not set, so emails are only listed here."
         };
-        Ok(site.page(
-            "Sent emails",
-            &format!(r#"<p class="notice">{mode}</p>{}"#, if items.is_empty() { "<p class=\"muted\">No emails yet.</p>".into() } else { items }),
-        ))
+        Ok(format!(r#"<p class="notice">{mode}</p>{}"#, if items.is_empty() { "<p class=\"muted\">No emails yet.</p>".into() } else { items }))
     }
 }
 
