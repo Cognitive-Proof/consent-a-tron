@@ -10,7 +10,7 @@
 //! as its rfc822Name SAN.
 //!
 //! Also hosts the mock TRQP registry for the guild's governance framework:
-//! certified producers are authorized to issue consent credentials, and
+//! every certificate holder is authorized to issue consent credentials, and
 //! Consent-o-tron's service key to publish their status lists.
 //!
 //! State lives in MongoDB (`enrollments`, `identity_records`,
@@ -45,20 +45,12 @@ use tower_http::services::{ServeDir, ServeFile};
 const CREDENTIAL_TYPE: &str = "ExampleGuildLikenessConsentCredential";
 const PRICE_CENTS: u32 = 500;
 
-#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum Role {
-    Producer,
-    Performer,
-}
-
 #[derive(Serialize, Deserialize)]
 struct Enrollment {
     #[serde(rename = "_id")]
     id: String,
     email_token: Option<String>,
     email: String,
-    role: Role,
     /// Unix seconds after which the mailbox link no longer works.
     #[serde(default)]
     email_token_expires: i64,
@@ -356,11 +348,7 @@ fn check_list(e: Option<&Enrollment>) -> String {
 
 /// One enrollment step: the band, the step's card, and the order summary.
 fn enroll_page(current: usize, main: &str, e: Option<&Enrollment>) -> Html<String> {
-    let product = match e.map(|e| e.role) {
-        Some(Role::Producer) => "LOA2 CAWG Producer",
-        Some(Role::Performer) => "LOA2 CAWG Individual",
-        None => "LOA2 CAWG Certificate",
-    };
+    let product = "LOA2 CAWG Certificate";
     let email = e.map_or(String::new(), |e| format!("<dt>Subject</dt><dd>{}</dd>", esc(&e.email)));
     let price = format!("${}.{:02}", PRICE_CENTS / 100, PRICE_CENTS % 100);
     let title = if current == STEPS.len() { "Your certificate is ready" } else { "Get your LOA2 CAWG certificate" };
@@ -389,10 +377,6 @@ async fn enroll_start() -> Html<String> {
 <p class="lead">A certificate ties your wallet's key to your verified email, so your consent can be checked by anyone who sees your files.</p>
 <label for="email">Email address</label>
 <input id="email" type="email" name="email" required placeholder="you@example.com" autocomplete="email" />
-<fieldset class="choices"><legend>I am a</legend>
-<label class="choice"><input type="radio" name="role" value="performer" checked /><span><strong>Performer</strong><span>I give consent to use my likeness.</span></span></label>
-<label class="choice"><input type="radio" name="role" value="producer" /><span><strong>Producer</strong><span>I ask for consent and issue credentials.</span></span></label>
-</fieldset>
 <div class="actions"><button>Continue</button></div>
 </form>"#,
         None,
@@ -402,7 +386,6 @@ async fn enroll_start() -> Html<String> {
 #[derive(Deserialize)]
 struct EnrollForm {
     email: String,
-    role: Role,
 }
 
 async fn enroll(State(app): State<App>, Form(form): Form<EnrollForm>) -> AppResult<Redirect> {
@@ -418,7 +401,6 @@ async fn enroll(State(app): State<App>, Form(form): Form<EnrollForm>) -> AppResu
             email_token: Some(token.clone()),
             email_token_expires: now_secs() + DAY,
             email: email.clone(),
-            role: form.role,
             verified: false,
             paid: false,
             card_checks: None,
@@ -896,7 +878,7 @@ async fn issue_certificate(State(app): State<App>, UrlPath(id): UrlPath<String>,
     if e.cert_chain_pem.is_some() {
         return Err(anyhow!("a certificate was already issued for this enrollment").into());
     }
-    let (email, role, challenge) = (e.email, e.role, e.challenge);
+    let (email, challenge) = (e.email, e.challenge);
 
     // Proof of possession: the wallet signed our challenge with the key.
     let key_bytes: [u8; 32] = STANDARD.decode(&proof.public_key)?.try_into().map_err(|_| anyhow!("bad public key"))?;
@@ -910,9 +892,9 @@ async fn issue_certificate(State(app): State<App>, UrlPath(id): UrlPath<String>,
 
     let chain = issue(&app.root, &key_bytes, &email)?;
     set(&app, &id, doc! { "cert_chain_pem": &chain, "did": &proof.did }).await?;
-    if role == Role::Producer {
-        authorize(&app.registry, &proof.did, "issue").await?;
-    }
+    // Every certificate holder may ask for consent. A guild would decide this
+    // itself; the demo has no approval step, so issuance grants it.
+    authorize(&app.registry, &proof.did, "issue").await?;
     Ok(Json(json!({ "certChainPem": chain, "email": email, "issuer": "Test CAWG Root" })))
 }
 

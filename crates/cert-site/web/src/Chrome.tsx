@@ -48,7 +48,7 @@ export function Nav({ onHome = false }: { onHome?: boolean }) {
 }
 
 const FOOTER: [string, string[]][] = [
-  ["Certificates", ["LOA2 CAWG Individual", "CAWG Organization", "Document Signing", "Code Signing", "Compare certificates"]],
+  ["Certificates", ["LOA2 CAWG Certificate", "CAWG Organization", "Document Signing", "Code Signing", "Compare certificates"]],
   ["Solutions", ["Newsrooms", "Studios & agencies", "Talent & performers", "Platforms", "Enterprise PKI"]],
   ["Resources", ["What is CAWG?", "Levels of assurance", "C2PA explained", "Developer docs", "Status"]],
   ["Company", ["About NotSSL", "Careers", "Press", "Legal & policies", "Contact"]],
