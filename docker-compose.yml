@@ -1,4 +1,7 @@
 # Local services for the demo sites.
+# The project name is pinned so the existing local MongoDB container and
+# volume (created when this repo lived in a folder of that name) keep working.
+name: cawg-consent-test
 services:
   mongo:
     image: mongo:8.0
