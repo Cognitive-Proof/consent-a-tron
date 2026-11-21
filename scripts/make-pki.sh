@@ -51,5 +51,8 @@ leaf participant "/C=US/O=Consent Test/CN=Alex Participant" cawg-root \
 # The requester (issuer of the consent credential) only needs a did:key.
 "$OPENSSL" genpkey -algorithm ED25519 -out requester.key
 
+# Consent-o-tron's service key: signs the status lists it publishes.
+"$OPENSSL" genpkey -algorithm ED25519 -out consent-o-tron.key
+
 rm -f ./*.srl
 echo "PKI written to $(pwd)"

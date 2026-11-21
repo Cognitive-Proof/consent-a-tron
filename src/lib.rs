@@ -7,6 +7,8 @@
 //! - a mock TRQP authorization query
 //! - schema validation of the credential
 
+pub mod verify;
+
 use std::path::Path;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -27,6 +29,22 @@ pub const GUILD_SCHEMA_ID: &str =
 
 /// Ed25519 multicodec prefix (0xed, varint-encoded).
 const ED25519_MULTICODEC: [u8; 2] = [0xed, 0x01];
+
+/// Reads a PKI file by name (e.g. `cawg-root.key`): from the environment
+/// variable `PKI_CAWG_ROOT_KEY` when set (how Cloud Run passes secrets),
+/// otherwise from `<root>/pki/<name>`.
+pub fn pki(root: &Path, name: &str) -> Result<String> {
+    let var = format!("PKI_{}", name.to_uppercase().replace(['-', '.'], "_"));
+    match std::env::var(&var) {
+        Ok(value) => Ok(value),
+        Err(_) => std::fs::read_to_string(root.join("pki").join(name))
+            .with_context(|| format!("{var} is not set and pki/{name} is missing (run scripts/make-pki.sh)")),
+    }
+}
+
+pub fn load_ed25519_pem(pem: &str) -> Result<SigningKey> {
+    SigningKey::from_pkcs8_pem(pem).map_err(|e| anyhow!("Ed25519 key: {e}"))
+}
 
 pub fn load_ed25519(path: &Path) -> Result<SigningKey> {
     let pem = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
@@ -220,12 +238,180 @@ pub fn validate_schema(schema_dir: &Path, credential: &Value) -> Result<Vec<Stri
     Ok(validator.iter_errors(credential).map(|e| format!("{} at {}", e, e.instance_path)).collect())
 }
 
+// ---------------------------------------------------------------- credential
+
+pub const GOVERNANCE_FRAMEWORK: &str = "https://guild.example/gf/likeness-consent/v1";
+pub const TRUST_REGISTRY: &str = "https://trqp.guild.example";
+
+/// Everything that goes into a consent credential before it is signed.
+pub struct CredentialParams<'a> {
+    pub issuer_did: &'a str,
+    /// `did:key:…`, or `mailto:…` when the participant is known only by the
+    /// email their identity certificate attests.
+    pub subject_id: &'a str,
+    pub asset_hash_b64: &'a str,
+    pub credential_type: &'a str,
+    pub industry_schema_id: &'a str,
+    pub status_list_url: &'a str,
+    pub status_index: usize,
+    /// Public terms, as defined by the industry schema.
+    pub consent: Value,
+    /// Private agreement; only its salted digest goes in the credential.
+    pub agreement: &'a Value,
+    pub salt: &'a [u8],
+    pub valid_from: &'a str,
+}
+
+/// Builds the unsecured consent credential; proofs are added with [`add_proof`].
+pub fn build_credential(p: &CredentialParams) -> Result<Value> {
+    Ok(json!({
+        "@context": ["https://www.w3.org/ns/credentials/v2", "https://cawg.io/consent/v1"],
+        "id": format!("urn:uuid:{}", uuid_v4()),
+        "type": ["VerifiableCredential", "CawgConsentCredential", p.credential_type],
+        "issuer": p.issuer_did,
+        "validFrom": p.valid_from,
+        "credentialSchema": [
+            { "id": BASE_SCHEMA_ID, "type": "JsonSchema" },
+            { "id": p.industry_schema_id, "type": "JsonSchema" }
+        ],
+        "credentialStatus": {
+            "id": format!("{}#{}", p.status_list_url, p.status_index),
+            "type": "BitstringStatusListEntry",
+            "statusPurpose": "revocation",
+            "statusListIndex": p.status_index.to_string(),
+            "statusListCredential": p.status_list_url
+        },
+        "governanceFramework": { "id": GOVERNANCE_FRAMEWORK, "trustRegistry": TRUST_REGISTRY },
+        "credentialSubject": {
+            "id": p.subject_id,
+            "consentDomain": "identity",
+            "assetBinding": { "bindingType": "c2pa.hash.data", "alg": "sha256", "hash": p.asset_hash_b64 },
+            "privateTermsDigest": { "alg": "sha256", "digest": private_terms_digest(p.salt, p.agreement)? },
+            "consent": p.consent
+        }
+    }))
+}
+
+/// A Bitstring Status List credential, unsigned.
+pub fn build_status_list(url: &str, issuer_did: &str, revoked: &[usize]) -> Result<Value> {
+    Ok(json!({
+        "@context": ["https://www.w3.org/ns/credentials/v2"],
+        "id": url,
+        "type": ["VerifiableCredential", "BitstringStatusListCredential"],
+        "issuer": issuer_did,
+        "validFrom": now(),
+        "credentialSubject": {
+            "id": format!("{url}#list"),
+            "type": "BitstringStatusList",
+            "statusPurpose": "revocation",
+            "encodedList": encode_status_list(revoked)?
+        }
+    }))
+}
+
+/// Builder definition for a manifest carrying the consent credential(s).
+pub fn manifest_definition(credentials: &[Value], generator: &str) -> Value {
+    json!({
+        "claim_generator_info": [{ "name": generator, "version": env!("CARGO_PKG_VERSION") }],
+        "assertions": [{
+            "label": CONSENT_LABEL,
+            "kind": "Json",
+            "created": true,
+            "data": { "credentials": credentials }
+        }]
+    })
+}
+
+pub fn uuid_v4() -> String {
+    use rand::RngCore;
+    let mut b = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut b);
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let h = hex::encode(b);
+    format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
+}
+
+// ---------------------------------------------------------------- certificates
+
+/// What the verifier needs from an identity signer's certificate.
+pub struct SignerCert {
+    pub ed25519_key: [u8; 32],
+    /// rfc822Name subject alternative names.
+    pub emails: Vec<String>,
+}
+
+pub fn signer_cert(der: &[u8]) -> Result<SignerCert> {
+    use x509_parser::{extensions::GeneralName, prelude::*};
+    let (_, cert) = X509Certificate::from_der(der).map_err(|e| anyhow!("certificate: {e}"))?;
+    let spki = cert.public_key();
+    if spki.algorithm.algorithm.to_id_string() != "1.3.101.112" {
+        bail!("signer certificate is not Ed25519");
+    }
+    let ed25519_key = spki.subject_public_key.data.as_ref().try_into()?;
+    let emails = cert
+        .subject_alternative_name()
+        .ok()
+        .flatten()
+        .map(|san| {
+            san.value
+                .general_names
+                .iter()
+                .filter_map(|n| match n {
+                    GeneralName::RFC822Name(e) => Some(e.to_string()),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(SignerCert { ed25519_key, emails })
+}
+
+/// Splits a PEM certificate chain into DER certificates, leaf first.
+pub fn pem_chain_to_der(chain_pem: &str) -> Result<Vec<Vec<u8>>> {
+    let ders: Vec<Vec<u8>> = x509_parser::pem::Pem::iter_from_buffer(chain_pem.as_bytes())
+        .map(|p| p.map(|p| p.contents).map_err(|e| anyhow!("PEM: {e}")))
+        .collect::<Result<_>>()?;
+    if ders.is_empty() {
+        bail!("no certificates in PEM chain");
+    }
+    Ok(ders)
+}
+
+/// Checks that each certificate in the chain is signed by the next, and the
+/// last by `root_pem`, then returns the leaf's key and emails. Validity
+/// dates and EKUs are left to the c2pa trust check on the final file.
+pub fn verify_cert_chain(chain_pem: &str, root_pem: &str) -> Result<SignerCert> {
+    use x509_parser::prelude::*;
+    let chain = pem_chain_to_der(chain_pem)?;
+    let root = pem_chain_to_der(root_pem)?.remove(0);
+    let mut certs: Vec<&[u8]> = chain.iter().map(Vec::as_slice).collect();
+    if certs.last() != Some(&root.as_slice()) {
+        certs.push(&root);
+    }
+    let parsed = certs
+        .iter()
+        .map(|der| X509Certificate::from_der(der).map(|(_, c)| c).map_err(|e| anyhow!("certificate: {e}")))
+        .collect::<Result<Vec<_>>>()?;
+    for pair in parsed.windows(2) {
+        pair[0].verify_signature(Some(pair[1].public_key())).map_err(|_| anyhow!("certificate chain does not verify"))?;
+    }
+    signer_cert(&chain[0])
+}
+
+/// DER SubjectPublicKeyInfo for a raw Ed25519 public key.
+pub fn ed25519_spki_der(key: &[u8; 32]) -> Vec<u8> {
+    let mut der = vec![0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00];
+    der.extend_from_slice(key);
+    der
+}
+
 // ---------------------------------------------------------------- c2pa settings
 
 /// c2pa-rs settings: test trust anchors for both the claim signer (C2PA)
 /// and the identity assertion signer (CAWG), plus signers when signing.
 pub fn c2pa_settings_toml(root: &Path, with_signers: bool) -> Result<String> {
-    let pem = |name: &str| std::fs::read_to_string(root.join("pki").join(name));
+    let pem = |name: &str| pki(root, name);
     let mut toml = format!(
         r#"version = 1
 
