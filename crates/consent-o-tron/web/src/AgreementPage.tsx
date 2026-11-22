@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
-import { ApiError, getJson, getTemplates, postJson, shortDate, shortLabel, showValue, type AgreementView } from "./api";
+import { ApiError, getJson, getTemplates, shortDate, shortLabel, showValue, type AgreementView } from "./api";
 import { Band, Frame } from "./Chrome";
 import { Modal } from "./Modal";
 import { StagePill } from "./Agreements";
 import { useSession } from "./session";
-import { consent, signAsProducer, type ConsentStep } from "./wallet";
+import { consent, signAsProducer, withdraw, type ConsentStep } from "./wallet";
 
 function inviteParam() {
   return new URLSearchParams(location.search).get("invite");
@@ -103,6 +103,13 @@ function ConsentModal({ a, onDone, onClose }: { a: AgreementView; onDone: () => 
       </div>
     </Modal>
   );
+}
+
+function withdrawnByText(a: AgreementView): string {
+  const mine = a.withdrawnBy === a.role;
+  if (a.withdrawnBy === "producer") return mine ? "You withdrew this consent." : `${a.producerEmail} withdrew this consent.`;
+  if (a.withdrawnBy === "cosigner") return mine ? "You withdrew your consent." : `${a.cosignerEmail} withdrew their consent.`;
+  return "Consent has been withdrawn.";
 }
 
 export function AgreementPage({ id }: { id: string }) {
@@ -239,7 +246,7 @@ export function AgreementPage({ id }: { id: string }) {
       <div className={`panel ${a.revoked ? "panel-bad" : "panel-good"}`}>
         <p>
           {a.revoked
-            ? "Consent has been withdrawn. The file stays signed, but verifiers that check status see the consent as withdrawn."
+            ? `${withdrawnByText(a)} The file stays signed, but verifiers that check status see the consent as withdrawn.`
             : `The file is signed by Consent-O-Tron and carries the consent credential and ${a.cosignerEmail}'s identity assertion.`}
         </p>
         <div className="panel-actions">
@@ -249,7 +256,7 @@ export function AgreementPage({ id }: { id: string }) {
           <a className="btn btn-ghost" href={`/a/${a.id}/verify${q}`}>
             Verify
           </a>
-          {a.role === "cosigner" && !a.revoked && (
+          {!a.revoked && a.signerDid && (
             <button className="btn btn-danger" onClick={() => setWithdrawing(true)}>
               Withdraw consent
             </button>
@@ -328,14 +335,15 @@ export function AgreementPage({ id }: { id: string }) {
         />
       )}
       {withdrawing && (
-        <Modal title="Withdraw your consent?" onClose={() => setWithdrawing(false)}>
+        <Modal title={a.role === "cosigner" ? "Withdraw your consent?" : "Withdraw this consent?"} onClose={() => setWithdrawing(false)}>
           <p>
-            The file stays signed, but anyone who verifies it online will see that you withdrew consent. Withdrawal applies to uses after
-            it is recorded. It can't be undone.
+            The file stays signed, but anyone who verifies it online will see the consent as withdrawn. Withdrawal applies to uses after
+            it is recorded. It can't be undone. You sign the withdrawal with your wallet, and{" "}
+            {a.role === "cosigner" ? a.producerEmail : a.cosignerEmail} is emailed.
           </p>
           <div className="wizard-actions">
             <button className="btn btn-ghost" onClick={() => setWithdrawing(false)}>
-              Keep my consent
+              {a.role === "cosigner" ? "Keep my consent" : "Keep the consent"}
             </button>
             <span className="spacer" />
             <button
@@ -343,7 +351,7 @@ export function AgreementPage({ id }: { id: string }) {
               disabled={busy}
               onClick={() =>
                 run(async () => {
-                  await postJson(`/api/a/${a.id}/withdraw`, { invite: a.invite });
+                  await withdraw(a);
                   setWithdrawing(false);
                 })
               }

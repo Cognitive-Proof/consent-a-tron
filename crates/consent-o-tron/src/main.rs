@@ -127,6 +127,9 @@ struct Agreement {
     cosigner_chain_pem: Option<String>,
     status_index: i64,
     revoked: bool,
+    /// The signed withdrawal statement (`Withdrawal` as JSON), once withdrawn.
+    #[serde(default)]
+    withdrawal: Option<String>,
     stage: Stage,
     error: Option<String>,
     /// Object key of the signed file.
@@ -567,6 +570,7 @@ async fn create_agreement(State(app): State<App>, headers: HeaderMap, mut form: 
             cosigner_chain_pem: None,
             status_index: index as i64,
             revoked: false,
+            withdrawal: None,
             stage: Stage::AwaitingProducer,
             error: None,
             signed_key: None,
@@ -645,6 +649,9 @@ async fn agreement_view(
         "walletAsset": a.wallet_asset(),
         "stage": a.stage,
         "revoked": a.revoked,
+        "withdrawnBy": a.withdrawal.as_deref().and_then(|w| serde_json::from_str::<Withdrawal>(w).ok()).map(|w| w.by),
+        // The key this viewer signed the credential with, which a withdrawal must use.
+        "signerDid": if role == "producer" { Some(a.producer_did.clone()) } else { a.cosigner_did.clone() },
         "error": a.error,
         "blocked": blocked,
         "producerSigned": a.producer_proof.is_some(),
@@ -833,17 +840,65 @@ async fn identity_signature(State(app): State<App>, UrlPath(id): UrlPath<String>
 
 // ------------------------------------------------------------------ withdrawal + status list
 
-#[derive(Deserialize)]
-struct WithdrawBody {
-    invite: String,
+/// What a party signs to withdraw: a fresh challenge, the credential and
+/// their own key, so the statement can't be replayed onto another credential.
+fn withdrawal_message(challenge: &str, credential_id: &str, did: &str) -> String {
+    format!("consent-withdrawal:{}", json!([challenge, credential_id, did]))
 }
 
+#[derive(Deserialize)]
+struct WithdrawBody {
+    challenge: String,
+    did: String,
+    signature: String,
+}
+
+/// Kept on the agreement as evidence of who withdrew.
+#[derive(Serialize, Deserialize)]
+struct Withdrawal {
+    /// "producer" or "cosigner".
+    by: String,
+    did: String,
+    at: String,
+    challenge: String,
+    signature: String,
+}
+
+/// Either party that signed the credential can withdraw it, by signing a
+/// withdrawal statement with the key they signed the credential with. Both
+/// set the same status list bit.
 async fn withdraw(State(app): State<App>, UrlPath(id): UrlPath<String>, Json(body): Json<WithdrawBody>) -> AppResult<Json<Value>> {
     let a = load(&app, &id).await?;
-    if body.invite != a.invite_token {
-        return Err(forbidden("only the person who consented can withdraw"));
+    if a.participant_proof.is_none() {
+        return Err(forbidden("consent hasn't been given, so there is nothing to withdraw"));
     }
-    set(&app, &id, doc! { "revoked": true }).await?;
+    if a.revoked {
+        return Err(forbidden("consent has already been withdrawn"));
+    }
+    let (by, other) = if body.did == a.producer_did {
+        ("producer", &a.cosigner_email)
+    } else if a.cosigner_did.as_deref() == Some(body.did.as_str()) {
+        ("cosigner", &a.producer_email)
+    } else {
+        return Err(forbidden("only the producer or the person who consented can withdraw"));
+    };
+    take_challenge(&app, &body.challenge).await?;
+    let credential_id = a.unsecured()["id"].as_str().unwrap_or_default().to_string();
+    let sig = Signature::from_slice(&STANDARD.decode(&body.signature)?)?;
+    resolve_did_key(&body.did)?
+        .verify(withdrawal_message(&body.challenge, &credential_id, &body.did).as_bytes(), &sig)
+        .map_err(|_| anyhow!("withdrawal signature does not verify"))?;
+    let record = Withdrawal { by: by.into(), did: body.did, at: now(), challenge: body.challenge, signature: body.signature };
+    set(&app, &id, doc! { "revoked": true, "withdrawal": serde_json::to_string(&record)? }).await?;
+    let who = if by == "producer" { &a.producer_email } else { &a.cosigner_email };
+    app.mailer
+        .send(
+            other,
+            &format!("{who} withdrew consent"),
+            &format!("{who} withdrew the consent for {} on {}. Verifiers that check status now see it as withdrawn.", a.title, a.asset_name),
+            &if by == "producer" { format!("{CONSENT_SITE}/a/{id}?invite={}", a.invite_token) } else { format!("{CONSENT_SITE}/a/{id}") },
+        )
+        .await?;
     Ok(Json(json!({ "ok": true })))
 }
 

@@ -10,6 +10,7 @@
 //   certificate:deliver  { certChainPem, email, issuer } -> { did }
 //   credential:sign      { credential, role, asset, counterparty?, agreementText? } -> { proof }
 //   identity:sign        { toBeSigned, consentHash, asset }          -> { signature }
+//   consent:withdraw     { challenge, credentialId, signer, asset }  -> { did, signature }
 //   registry:request     { challenge, permission, entityId }         -> { did, signature }
 //
 // A declined or failed request gets { type: "error", message }.
@@ -26,6 +27,7 @@ import {
   rawPublicKey,
   signBytes,
   signChallenge,
+  withdrawalMessage,
 } from "./crypto";
 import { history, identities, type Identity } from "./store";
 
@@ -328,6 +330,25 @@ async function handle(req: Request, origin: string): Promise<Record<string, unkn
       const signature = b64(await signBytes(who.keys.privateKey, toBeSigned));
       await history.add({ at: now(), origin, identityId: who.id, action: "Signed identity assertion", summary: String((req.asset as Record<string, unknown>)?.name ?? "") });
       return { signature };
+    }
+
+    case "consent:withdraw": {
+      // Either party withdraws with the key they signed the credential with.
+      const signer = String(req.signer ?? "");
+      const credentialId = String(req.credentialId ?? "");
+      const who = await approve(
+        origin,
+        "Withdraw consent",
+        `<p>This withdraws the consent for this file. The file stays signed, but verifiers that check status will see it as withdrawn.
+           It can't be undone.</p>
+         ${assetBlock(req.asset as Record<string, unknown>)}`,
+        { choose: (all) => all.filter((i) => i.did === signer), approveLabel: "Withdraw" },
+      );
+      if (!who) throw new Error("declined");
+      if (who.did !== signer) throw new Error("this identity did not sign the credential");
+      const signature = b64(await signBytes(who.keys.privateKey, withdrawalMessage(String(req.challenge), credentialId, who.did)));
+      await history.add({ at: now(), origin, identityId: who.id, action: "Withdrew consent", summary: String((req.asset as Record<string, unknown>)?.name ?? credentialId) });
+      return { did: who.did, signature };
     }
 
     case "registry:request": {

@@ -49,6 +49,20 @@ export function signAsProducer(a: AgreementView): Promise<void> {
   });
 }
 
+/** Either party withdraws, signing with the key they signed the credential with. */
+export function withdraw(a: AgreementView): Promise<void> {
+  return withWallet(async (wallet) => {
+    const { challenge } = await getJson<{ challenge: string }>("/api/challenge");
+    const { did, signature } = await wallet.request("consent:withdraw", {
+      challenge,
+      credentialId: (a.credential as { id: string }).id,
+      signer: a.signerDid,
+      asset: a.walletAsset,
+    });
+    await postJson(`/api/a/${a.id}/withdraw`, { challenge, did, signature });
+  });
+}
+
 export type ConsentStep = "connect" | "consent" | "authoring" | "identity" | "done";
 
 /**
