@@ -2,6 +2,8 @@
   "id": "commercial-campaign",
   "title": "Commercial campaign release",
   "description": "Promotional and commercial use, for example an advertising campaign.",
+  "category": "Commercial",
+  "updated": "2026-11-09",
   "public": [
     {
       "name": "aspects",

@@ -19,15 +19,15 @@ Three sites show the flow with real people.
 
 | Site | Port | What it does |
 |---|---|---|
-| Certificate site, "NotSSL" ([crates/cert-site](crates/cert-site/src/main.rs)) | 4001 | A React home page ([web](crates/cert-site/web/src/Home.tsx)); links with no content go to `/demo`. Enrollment at `/enroll`, modeled on NIST LOA2 / IAL2: email and a single-use 24-hour mailbox link; a Stripe test payment, where the card issuer checks the billing address; name, date of birth and ID number validated against a mock records bureau (`/records`), with ID and face photos discarded; a 6-digit enrollment code sent to the email of record; and finally an Ed25519 certificate from the CAWG test CA with the verified email. It also hosts the mock TRQP registry: certified producers may `issue`, and Consent-o-tron's key may `publish-status`. |
+| Certificate site, "NotSSL" ([crates/cert-site](crates/cert-site/src/main.rs)) | 4001 | A React home page ([web](crates/cert-site/web/src/Home.tsx)); links with no content go to `/demo`. Enrollment at `/enroll`, modeled on NIST LOA2 / IAL2: email and a single-use 24-hour mailbox link; a Stripe test payment, where the card issuer checks the billing address; name, date of birth and ID number validated against a mock records bureau (`/records`), with ID and face photos discarded; a 6-digit enrollment code sent to the email of record; and finally an Ed25519 certificate from the CAWG test CA with the verified email. It also hosts the mock TRQP registry: certified producers may `issue`, and Consent-O-Tron's key may `publish-status`. |
 | Wallet ([wallet](wallet/src/main.ts)) | 4002 | Static app. It creates non-exportable Ed25519 keys (WebCrypto, IndexedDB), holds certificates, and signs on request. |
-| Consent-o-tron ([crates/consent-o-tron](crates/consent-o-tron/src/main.rs)) | 4003 | The producer picks a template, uploads a JPEG, names the person consenting by email, and signs. The person consenting reviews, consents, and signs their CAWG identity assertion while the file is authored. It also handles withdrawal and verification of any file. |
+| Consent-O-Tron ([crates/consent-o-tron](crates/consent-o-tron/src/main.rs)) | 4003 | A React app ([web](crates/consent-o-tron/web/src/Gallery.tsx)) over a JSON API. The home page is a searchable gallery of the agreement templates; links with no content go to `/demo`. Choosing a template asks for a wallet login, then opens a wizard: the producer uploads a JPEG, names the person consenting by email, sets the terms, and signs. The person consenting reviews, consents, and signs their CAWG identity assertion while the file is authored. It also handles withdrawal and verification of any file. |
 
 **How the pieces connect:**
 - **Wallet dialog.** Sites open the wallet in a dialog (an iframe) and talk to it with `postMessage` ([wallet-client.js](crates/demo-common/src/wallet-client.js)). The wallet answers only allow-listed origins.
 - **Same site required.** An embedded wallet can reach its keys only when the wallet and the sites are the same site. `localhost:*` is; in production, use subdomains of one domain, not separate `*.run.app` URLs.
 - **Credential subject.** It is `mailto:<email>`: the producer signs before the person consenting has connected a wallet. The verifier requires the identity signer's certificate to carry that email, and the participant proof to use that certificate's key.
-- **Identity signature.** Consent-o-tron builds the manifest with c2pa-rs. The identity signature comes from a `RawSigner` that waits for the person's wallet ([authoring.rs](crates/consent-o-tron/src/authoring.rs)). The wallet signs only if the bytes reference `cawg.consent`. For the exact assertion hash it relies on Consent-o-tron.
+- **Identity signature.** Consent-O-Tron builds the manifest with c2pa-rs. The identity signature comes from a `RawSigner` that waits for the person's wallet ([authoring.rs](crates/consent-o-tron/src/authoring.rs)). The wallet signs only if the bytes reference `cawg.consent`. For the exact assertion hash it relies on Consent-O-Tron.
 
 **Storage:**
 - MongoDB holds enrollments, agreements, sessions, the TRQP registry, and sent emails.
@@ -48,7 +48,7 @@ docker compose up -d mongo
 cp .env.example .env
 ```
 
-Build the NotSSL home page with `npm install && npm run build` in `crates/cert-site/web/` (or `npm run dev` there for live editing on port 4004). Then start `cargo run -p cert-site`, `cargo run -p consent-o-tron`, and `npm run dev` in `wallet/` (after `npm install`). Without Stripe or Resend keys, payment is simulated and emails appear only on `/outbox`.
+Build the NotSSL home page with `npm install && npm run build` in `crates/cert-site/web/` (or `npm run dev` there for live editing on port 4004), and Consent-O-Tron's pages the same way in `crates/consent-o-tron/web/` (live editing on port 4005). Then start `cargo run -p cert-site`, `cargo run -p consent-o-tron`, and `npm run dev` in `wallet/` (after `npm install`). Without Stripe or Resend keys, payment is simulated and emails appear only on `/outbox`.
 
 `npm run vector` in `wallet/` regenerates [tests/vectors/js-proof.json](tests/vectors/js-proof.json). [tests/interop.rs](tests/interop.rs) checks that a proof made by the wallet's TypeScript verifies in Rust.
 

@@ -2,6 +2,8 @@
   "id": "editorial-release",
   "title": "Editorial photo release",
   "description": "Use of a person's image and likeness in news and editorial contexts only.",
+  "category": "Editorial",
+  "updated": "2026-11-02",
   "public": [
     {
       "name": "aspects",

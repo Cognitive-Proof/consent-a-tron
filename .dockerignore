@@ -2,6 +2,7 @@ target
 **/node_modules
 wallet/dist
 crates/cert-site/web/dist
+crates/consent-o-tron/web/dist
 pki
 data
 out

@@ -2,6 +2,8 @@
   "id": "performance-capture",
   "title": "Performance capture release",
   "description": "A performer's likeness, voice and movement in a finished work, with no digital replica.",
+  "category": "Performance",
+  "updated": "2026-11-16",
   "public": [
     {
       "name": "aspects",

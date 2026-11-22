@@ -261,13 +261,20 @@ impl Mailer {
         Ok(site.page("Sent emails", &self.outbox_body().await?))
     }
 
-    /// The outbox list without the page around it, for sites with their own layout.
-    pub async fn outbox_body(&self) -> anyhow::Result<String> {
+    /// The latest 50 emails this site sent, newest first.
+    pub async fn list(&self) -> anyhow::Result<Vec<Email>> {
         // Sorted here rather than in the query, so Firestore needs no composite index.
         let mut emails: Vec<Email> = self.outbox.find(doc! { "site": self.site }).await?.try_collect().await?;
         emails.sort_by(|a, b| b.at.cmp(&a.at));
         emails.truncate(50);
-        let items: String = emails
+        Ok(emails)
+    }
+
+    /// The outbox list without the page around it, for sites with their own layout.
+    pub async fn outbox_body(&self) -> anyhow::Result<String> {
+        let items: String = self
+            .list()
+            .await?
             .iter()
             .map(|e| {
                 let badge = match e.delivery.as_str() {
