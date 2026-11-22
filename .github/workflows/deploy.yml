@@ -24,6 +24,9 @@ env:
   CERT_SITE_URL: https://certs.cognitive-proof.com
   WALLET_URL: https://wallet.cognitive-proof.com
   CONSENT_SITE_URL: https://consent.cognitive-proof.com
+  # The guild's trust registry site (REGISTRY above is the image registry).
+  TRUST_REGISTRY_URL: https://registry.cognitive-proof.com
+  REGISTRY_ADMIN_EMAILS: mrappard@cognitive-proof.com
 
 jobs:
   test:
@@ -41,12 +44,15 @@ jobs:
             wallet/package-lock.json
             crates/cert-site/web/package-lock.json
             crates/consent-o-tron/web/package-lock.json
+            registry/package-lock.json
       - run: npm ci && npm run build
         working-directory: wallet
       - run: npm ci && npm run build
         working-directory: crates/cert-site/web
       - run: npm ci && npm run build
         working-directory: crates/consent-o-tron/web
+      - run: npm ci && npm run build
+        working-directory: registry
 
   deploy:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
@@ -94,15 +100,29 @@ jobs:
           build-args: |
             VITE_CERT_SITE_URL=${{ env.CERT_SITE_URL }}
             VITE_CONSENT_SITE_URL=${{ env.CONSENT_SITE_URL }}
+            VITE_REGISTRY_URL=${{ env.TRUST_REGISTRY_URL }}
           push: true
           tags: ${{ env.REGISTRY }}/wallet:${{ github.sha }}
           cache-from: type=gha,scope=wallet
           cache-to: type=gha,mode=max,scope=wallet
 
+      - name: Build trust registry
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: registry/Dockerfile
+          push: true
+          tags: ${{ env.REGISTRY }}/trust-registry:${{ github.sha }}
+          cache-from: type=gha,scope=trust-registry
+          cache-to: type=gha,mode=max,scope=trust-registry
+
+      # The cognitive-proof.com org enforces Domain Restricted Sharing, so
+      # allUsers can't be granted run.invoker. --no-invoker-iam-check makes
+      # each service public without an allUsers binding.
       - name: Deploy
         run: |
           set -euo pipefail
-          urls="CERT_SITE_URL=$CERT_SITE_URL,WALLET_URL=$WALLET_URL,CONSENT_SITE_URL=$CONSENT_SITE_URL,MONGODB_DB=consent-demo"
+          urls="CERT_SITE_URL=$CERT_SITE_URL,WALLET_URL=$WALLET_URL,CONSENT_SITE_URL=$CONSENT_SITE_URL,REGISTRY_URL=$TRUST_REGISTRY_URL,MONGODB_DB=consent-demo"
 
           # Stripe and Resend are optional: attach them only once the secrets exist.
           optional() {
@@ -115,7 +135,7 @@ jobs:
 
           gcloud run deploy cert-site --project "$PROJECT_ID" --region "$REGION" \
             --image "$REGISTRY/cert-site:$GITHUB_SHA" \
-            --service-account "$RUNTIME_SA" --allow-unauthenticated \
+            --service-account "$RUNTIME_SA" --no-invoker-iam-check \
             --max-instances 2 \
             --set-env-vars "$urls" \
             --set-secrets "MONGODB_URI=MONGODB_URI:latest,PKI_CAWG_ROOT_PEM=PKI_CAWG_ROOT_PEM:latest,PKI_CAWG_ROOT_KEY=PKI_CAWG_ROOT_KEY:latest,PKI_CONSENT_O_TRON_KEY=PKI_CONSENT_O_TRON_KEY:latest$(optional STRIPE_SECRET_KEY RESEND_API_KEY EMAIL_FROM)"
@@ -124,13 +144,21 @@ jobs:
           # authoring lives in memory and runs after the HTTP response.
           gcloud run deploy consent-o-tron --project "$PROJECT_ID" --region "$REGION" \
             --image "$REGISTRY/consent-o-tron:$GITHUB_SHA" \
-            --service-account "$RUNTIME_SA" --allow-unauthenticated \
+            --service-account "$RUNTIME_SA" --no-invoker-iam-check \
             --min-instances 0 --max-instances 1 --no-cpu-throttling --memory 1Gi \
             --set-env-vars "$urls,GCS_BUCKET=consent-o-tron-files" \
             --set-secrets "MONGODB_URI=MONGODB_URI:latest,PKI_CAWG_ROOT_PEM=PKI_CAWG_ROOT_PEM:latest,PKI_C2PA_ROOT_PEM=PKI_C2PA_ROOT_PEM:latest,PKI_CONSENT_O_TRON_KEY=PKI_CONSENT_O_TRON_KEY:latest,PKI_CLAIM_SIGNER_KEY=PKI_CLAIM_SIGNER_KEY:latest,PKI_CLAIM_SIGNER_CHAIN_PEM=PKI_CLAIM_SIGNER_CHAIN_PEM:latest$(optional RESEND_API_KEY EMAIL_FROM)"
 
           gcloud run deploy wallet --project "$PROJECT_ID" --region "$REGION" \
             --image "$REGISTRY/wallet:$GITHUB_SHA" \
-            --service-account "$RUNTIME_SA" --allow-unauthenticated \
+            --service-account "$RUNTIME_SA" --no-invoker-iam-check \
             --max-instances 2 --port 8080 \
-            --set-env-vars "FRAME_ANCESTORS=$CERT_SITE_URL $CONSENT_SITE_URL"
+            --set-env-vars "FRAME_ANCESTORS=$CERT_SITE_URL $CONSENT_SITE_URL $TRUST_REGISTRY_URL"
+
+          # The guild's trust registry: TRQP queries plus producer requests and admin approval.
+          gcloud run deploy trust-registry --project "$PROJECT_ID" --region "$REGION" \
+            --image "$REGISTRY/trust-registry:$GITHUB_SHA" \
+            --service-account "$RUNTIME_SA" --no-invoker-iam-check \
+            --max-instances 2 --port 8080 \
+            --set-env-vars "$urls,REGISTRY_ADMIN_EMAILS=$REGISTRY_ADMIN_EMAILS" \
+            --set-secrets "MONGODB_URI=MONGODB_URI:latest,PKI_CAWG_ROOT_PEM=PKI_CAWG_ROOT_PEM:latest,PKI_CONSENT_O_TRON_KEY=PKI_CONSENT_O_TRON_KEY:latest$(optional RESEND_API_KEY EMAIL_FROM)"

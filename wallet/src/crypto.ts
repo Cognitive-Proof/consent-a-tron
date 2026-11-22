@@ -89,6 +89,14 @@ export async function signBytes(privateKey: CryptoKey, data: Bytes): Promise<Byt
   return new Uint8Array(await subtle.sign("Ed25519", privateKey, data));
 }
 
+/**
+ * The bytes a trust registry's admin plugin (@cognitiveproof/cawg-trqp-plugin-admin)
+ * verifies for an access request: the challenge bound to the exact permission.
+ */
+export function accessRequestMessage(challenge: string, did: string, permission: { authority_id: string; action: string; resource: string }): Bytes {
+  return utf8(`trqp-access-request:${JSON.stringify([challenge, did, permission.authority_id, permission.action, permission.resource])}`);
+}
+
 /** Signs a challenge string; servers verify with the same prefix. */
 export async function signChallenge(privateKey: CryptoKey, purpose: string, challenge: string): Promise<string> {
   return b64(await signBytes(privateKey, utf8(`${purpose}:${challenge}`)));

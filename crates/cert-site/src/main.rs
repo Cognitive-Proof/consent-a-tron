@@ -9,9 +9,8 @@
 //! → Ed25519 leaf certificate from the CAWG test CA, with the verified email
 //! as its rfc822Name SAN.
 //!
-//! Also hosts the mock TRQP registry for the guild's governance framework:
-//! certified producers are authorized to issue consent credentials, and
-//! Consent-o-tron's service key to publish their status lists.
+//! A certificate alone doesn't authorize issuing consent credentials: that
+//! permission is granted by the guild's trust registry (registry/).
 //!
 //! State lives in MongoDB (`enrollments`, `identity_records`,
 //! `trqp_authorizations`, `outbox`).
@@ -30,10 +29,10 @@ use axum::{
     Form, Json, Router,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
-use cawg_consent_test::{did_key, ed25519_spki_der, load_ed25519_pem, pki, sha256_b64, uuid_v4, GOVERNANCE_FRAMEWORK};
+use cawg_consent_test::{did_key, ed25519_spki_der, pki, sha256_b64, uuid_v4};
 use demo_common::{
     esc,
-    mongodb::{bson::doc, options::UpdateOptions, Collection},
+    mongodb::{bson::doc, Collection},
     Mailer, CERT_SITE,
 };
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
@@ -42,15 +41,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tower_http::services::{ServeDir, ServeFile};
 
-const CREDENTIAL_TYPE: &str = "ExampleGuildLikenessConsentCredential";
 const PRICE_CENTS: u32 = 500;
-
-#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum Role {
-    Producer,
-    Performer,
-}
 
 #[derive(Serialize, Deserialize)]
 struct Enrollment {
@@ -58,7 +49,6 @@ struct Enrollment {
     id: String,
     email_token: Option<String>,
     email: String,
-    role: Role,
     /// Unix seconds after which the mailbox link no longer works.
     #[serde(default)]
     email_token_expires: i64,
@@ -140,22 +130,11 @@ fn mask_email(email: &str) -> String {
     }
 }
 
-/// One TRQP authorization: entity may perform action on resource under authority.
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
-struct Authorization {
-    entity_id: String,
-    authority_id: String,
-    action: String,
-    resource: String,
-    authorized: bool,
-}
-
 #[derive(Clone)]
 struct App {
     root: PathBuf,
     enrollments: Collection<Enrollment>,
     records: Collection<IdentityRecord>,
-    registry: Collection<Authorization>,
     mailer: Mailer,
     stripe_key: Option<String>,
     http: reqwest::Client,
@@ -192,15 +171,11 @@ async fn main() -> anyhow::Result<()> {
     let app = App {
         enrollments: db.collection("enrollments"),
         records: db.collection("identity_records"),
-        registry: db.collection("trqp_authorizations"),
         mailer: Mailer::new("cert-site", &db),
         root,
         stripe_key,
         http: reqwest::Client::new(),
     };
-    // Consent-o-tron's service key may publish status lists for the guild type.
-    let service = load_ed25519_pem(&pki(&app.root, "consent-o-tron.key")?)?;
-    authorize(&app.registry, &did_key(&service.verifying_key()), "publish-status").await?;
 
     let router = Router::new()
         .route("/", get(web_index))
@@ -217,7 +192,6 @@ async fn main() -> anyhow::Result<()> {
         .route("/enroll/{id}/code/resend", post(resend_code))
         .route("/enroll/{id}/certificate", post(issue_certificate))
         .route("/enroll/{id}/certificate.pem", get(certificate_pem))
-        .route("/trqp/registry", get(registry))
         .route("/records", get(records_page).post(create_record))
         .route("/outbox", get(outbox))
         .route("/static/notssl.css", get(style_css))
@@ -233,26 +207,6 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(demo_common::listen_addr(4001)).await?;
     axum::serve(listener, router).await?;
     Ok(())
-}
-
-// ------------------------------------------------------------------ registry
-
-async fn authorize(registry: &Collection<Authorization>, did: &str, action: &str) -> anyhow::Result<()> {
-    let key = doc! { "entity_id": did, "authority_id": GOVERNANCE_FRAMEWORK, "action": action, "resource": CREDENTIAL_TYPE };
-    registry
-        .update_one(key, doc! { "$set": { "authorized": true } })
-        .with_options(UpdateOptions::builder().upsert(true).build())
-        .await?;
-    Ok(())
-}
-
-/// The registry in the shape the verifier's mock TRQP query reads.
-async fn registry(State(app): State<App>) -> AppResult<Json<Value>> {
-    let entries: Vec<Authorization> = app.registry.find(doc! {}).await?.try_collect().await?;
-    Ok(Json(json!({
-        "_note": "Mock TRQP registry for the guild governance framework, operated by the Certificate site.",
-        "authorizations": entries
-    })))
 }
 
 async fn outbox(State(app): State<App>) -> AppResult<Html<String>> {
@@ -356,11 +310,7 @@ fn check_list(e: Option<&Enrollment>) -> String {
 
 /// One enrollment step: the band, the step's card, and the order summary.
 fn enroll_page(current: usize, main: &str, e: Option<&Enrollment>) -> Html<String> {
-    let product = match e.map(|e| e.role) {
-        Some(Role::Producer) => "LOA2 CAWG Producer",
-        Some(Role::Performer) => "LOA2 CAWG Individual",
-        None => "LOA2 CAWG Certificate",
-    };
+    let product = "LOA2 CAWG Certificate";
     let email = e.map_or(String::new(), |e| format!("<dt>Subject</dt><dd>{}</dd>", esc(&e.email)));
     let price = format!("${}.{:02}", PRICE_CENTS / 100, PRICE_CENTS % 100);
     let title = if current == STEPS.len() { "Your certificate is ready" } else { "Get your LOA2 CAWG certificate" };
@@ -389,10 +339,6 @@ async fn enroll_start() -> Html<String> {
 <p class="lead">A certificate ties your wallet's key to your verified email, so your consent can be checked by anyone who sees your files.</p>
 <label for="email">Email address</label>
 <input id="email" type="email" name="email" required placeholder="you@example.com" autocomplete="email" />
-<fieldset class="choices"><legend>I am a</legend>
-<label class="choice"><input type="radio" name="role" value="performer" checked /><span><strong>Performer</strong><span>I give consent to use my likeness.</span></span></label>
-<label class="choice"><input type="radio" name="role" value="producer" /><span><strong>Producer</strong><span>I ask for consent and issue credentials.</span></span></label>
-</fieldset>
 <div class="actions"><button>Continue</button></div>
 </form>"#,
         None,
@@ -402,7 +348,6 @@ async fn enroll_start() -> Html<String> {
 #[derive(Deserialize)]
 struct EnrollForm {
     email: String,
-    role: Role,
 }
 
 async fn enroll(State(app): State<App>, Form(form): Form<EnrollForm>) -> AppResult<Redirect> {
@@ -418,7 +363,6 @@ async fn enroll(State(app): State<App>, Form(form): Form<EnrollForm>) -> AppResu
             email_token: Some(token.clone()),
             email_token_expires: now_secs() + DAY,
             email: email.clone(),
-            role: form.role,
             verified: false,
             paid: false,
             card_checks: None,
@@ -896,7 +840,7 @@ async fn issue_certificate(State(app): State<App>, UrlPath(id): UrlPath<String>,
     if e.cert_chain_pem.is_some() {
         return Err(anyhow!("a certificate was already issued for this enrollment").into());
     }
-    let (email, role, challenge) = (e.email, e.role, e.challenge);
+    let (email, challenge) = (e.email, e.challenge);
 
     // Proof of possession: the wallet signed our challenge with the key.
     let key_bytes: [u8; 32] = STANDARD.decode(&proof.public_key)?.try_into().map_err(|_| anyhow!("bad public key"))?;
@@ -910,9 +854,6 @@ async fn issue_certificate(State(app): State<App>, UrlPath(id): UrlPath<String>,
 
     let chain = issue(&app.root, &key_bytes, &email)?;
     set(&app, &id, doc! { "cert_chain_pem": &chain, "did": &proof.did }).await?;
-    if role == Role::Producer {
-        authorize(&app.registry, &proof.did, "issue").await?;
-    }
     Ok(Json(json!({ "certChainPem": chain, "email": email, "issuer": "Test CAWG Root" })))
 }
 

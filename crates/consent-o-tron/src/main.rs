@@ -38,7 +38,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use cawg_consent_test::{
     add_proof, build_credential, build_status_list, did_key, did_of_vm, hard_binding_sha256, load_ed25519_pem, now, pki, resolve_did_key,
     uuid_v4,
-    verify::{verify_asset, Inputs, Report},
+    verify::{industry_type, verify_asset, Inputs, Report, TrqpQuery, TrqpQuestion},
     verify_cert_chain, verify_proofs, CredentialParams,
 };
 use demo_common::{
@@ -47,7 +47,7 @@ use demo_common::{
         options::{FindOneAndUpdateOptions, ReturnDocument},
         Collection,
     },
-    Blobs, Mailer, CERT_SITE, CONSENT_SITE,
+    registry_authority, Blobs, Mailer, CERT_SITE, CONSENT_SITE, REGISTRY_URL,
 };
 use ed25519_dalek::{Signature, SigningKey, Verifier};
 use futures_util::TryStreamExt;
@@ -261,6 +261,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/me", get(me))
         .route("/api/config", get(config))
         .route("/api/templates", get(templates_list))
+        .route("/api/permissions", get(permissions))
         .route("/api/agreements", get(agreements_list).post(create_agreement))
         .route("/api/a/{id}", get(agreement_view))
         .route("/api/a/{id}/producer-proof", post(producer_proof))
@@ -409,7 +410,21 @@ async fn me(State(app): State<App>, headers: HeaderMap) -> AppResult<Json<Value>
 
 /// Site URLs the pages link to, which differ per deployment.
 async fn config() -> Json<Value> {
-    Json(json!({ "certSite": CERT_SITE.get() }))
+    Json(json!({ "certSite": CERT_SITE.get(), "requestAccess": request_access_url() }))
+}
+
+/// Which templates the signed-in producer may issue, as the trust registry
+/// answers now: template id → null, or the registry's reason for refusing.
+/// `unavailable` when the registry can't be asked; creating checks again.
+async fn permissions(State(app): State<App>, headers: HeaderMap) -> AppResult<Json<Value>> {
+    let user = current_user(&app, &headers).await?.ok_or_else(unauthorized)?;
+    Ok(Json(match template_permissions(&app, &user.did).await {
+        Ok(perms) => json!({
+            "unavailable": false,
+            "refusals": perms.into_iter().map(|(t, refusal)| (t.id.clone(), json!(refusal))).collect::<serde_json::Map<_, _>>(),
+        }),
+        Err(_) => json!({ "unavailable": true, "refusals": {} }),
+    }))
 }
 
 // ------------------------------------------------------------------ producer: create
@@ -464,6 +479,17 @@ async fn create_agreement(State(app): State<App>, headers: HeaderMap, mut form: 
     }
     let tid = values.get("template").and_then(|v| v.first()).cloned().unwrap_or_default();
     let t = app.templates.iter().find(|t| t.id == tid).ok_or_else(|| anyhow!("unknown template"))?.clone();
+    // Check 1: before any work, and before the cosigner is asked for anything.
+    // Ask about the exact validFrom the credential will carry (whole seconds),
+    // since that's the moment the verifier asks about.
+    let valid_from = now();
+    if let Some(reason) = issue_refusal(&app, &user.did, &t.credential_type, Some(&valid_from)).await? {
+        return Err(forbidden(&format!(
+            "you aren't authorized to issue {} in the trust registry ({reason}); request access at {}",
+            t.credential_type,
+            request_access_url()
+        )));
+    }
     if asset.len() < 4 || asset[..3] != [0xff, 0xd8, 0xff] {
         return Err(anyhow!("please upload a JPEG image").into());
     }
@@ -508,10 +534,12 @@ async fn create_agreement(State(app): State<App>, headers: HeaderMap, mut form: 
         industry_schema_id: &t.schema_id,
         status_list_url: &status_list_url(),
         status_index: index,
+        governance_framework: &registry_authority(),
+        trust_registry: REGISTRY_URL.get(),
         consent: Value::Object(consent),
         agreement: &agreement_doc,
         salt: &salt,
-        valid_from: &now(),
+        valid_from: &valid_from,
     })?;
 
     let id = uuid_v4();
@@ -596,6 +624,13 @@ async fn agreement_view(
         Viewer::Cosigner(t) => ("cosigner", Some(t)),
         Viewer::Other => return Err(forbidden("only the producer and the person giving consent can open this agreement")),
     };
+    // Checks 2 and 3 refuse the next step; say so before anyone opens their wallet.
+    // A registry outage doesn't block the page, since the steps check again.
+    let blocked = match (role, a.stage) {
+        ("producer", Stage::AwaitingProducer) => signing_refusal(&app, &a).await.ok().flatten(),
+        (_, Stage::AwaitingCosigner) => issue_refusal(&app, &a.producer_did, industry_type(&a.unsecured()), None).await.ok().flatten(),
+        _ => None,
+    };
     Ok(Json(json!({
         "id": a.id,
         "title": a.title,
@@ -611,6 +646,7 @@ async fn agreement_view(
         "stage": a.stage,
         "revoked": a.revoked,
         "error": a.error,
+        "blocked": blocked,
         "producerSigned": a.producer_proof.is_some(),
         "participantSigned": a.participant_proof.is_some(),
         "publicTerms": a.public_terms(),
@@ -664,6 +700,13 @@ async fn producer_proof(State(app): State<App>, headers: HeaderMap, UrlPath(id):
     if did_of_vm(body.proof["verificationMethod"].as_str().unwrap_or_default()) != a.producer_did {
         return Err(anyhow!("the proof must be made by the issuer").into());
     }
+    // Check 2: the producer may still issue it, both now and as of validFrom.
+    if let Some(reason) = signing_refusal(&app, &a).await? {
+        return Err(forbidden(&format!(
+            "you aren't authorized to issue this credential in the trust registry ({reason}), so it wasn't sent for consent; request access at {}",
+            request_access_url()
+        )));
+    }
     set(&app, &id, doc! { "producer_proof": body.proof.to_string(), "stage": "awaiting_cosigner" }).await?;
     app.mailer
         .send(
@@ -708,6 +751,14 @@ async fn participant_proof(State(app): State<App>, UrlPath(id): UrlPath<String>,
     let chain = a.cosigner_chain_pem.clone().ok_or_else(|| anyhow!("connect your wallet first"))?;
     if check_proof(&a, &body.proof)? != resolve_did_key(&cosigner)?.to_bytes() {
         return Err(anyhow!("the consent must be signed by the identity you connected").into());
+    }
+    // Check 3: the producer may have been revoked since signing. Don't record
+    // consent or write a file for a credential its issuer can no longer issue.
+    if let Some(reason) = issue_refusal(&app, &a.producer_did, industry_type(&a.unsecured()), None).await? {
+        return Err(forbidden(&format!(
+            "{} is no longer authorized to issue this credential ({reason}), so your consent wasn't recorded and no file was written",
+            a.producer_email
+        )));
     }
     set(&app, &id, doc! { "participant_proof": body.proof.to_string(), "stage": "authoring" }).await?;
 
@@ -812,6 +863,58 @@ async fn status_list(State(app): State<App>) -> AppResult<Json<Value>> {
     Ok(Json(signed_status_list(&app).await?))
 }
 
+// ------------------------------------------------------------------ issuing permission
+
+/// The trust registry's reason for refusing `did` permission to issue
+/// `credential_type` at `time` (None: now), or None if it is authorized. It
+/// asks exactly what the verifier asks (verify::check_issuer), so Consent-o-tron
+/// refuses up front what verification would reject later.
+async fn issue_refusal(app: &App, did: &str, credential_type: &str, time: Option<&str>) -> AppResult<Option<String>> {
+    let mut body = json!({ "entity_id": did, "authority_id": registry_authority(), "action": "issue", "resource": credential_type });
+    if let Some(time) = time {
+        body["context"] = json!({ "time": time });
+    }
+    let answer: Value = app
+        .http
+        .post(format!("{REGISTRY_URL}/authorization"))
+        .json(&body)
+        .send()
+        .await
+        .and_then(|r| r.error_for_status())
+        .context("the trust registry could not be asked")?
+        .json()
+        .await?;
+    match answer["authorized"].as_bool() {
+        Some(true) => Ok(None),
+        Some(false) => Ok(Some(answer["reason"].as_str().unwrap_or("not_authorized").to_string())),
+        None => Err(anyhow!("the trust registry's answer has no authorized field").into()),
+    }
+}
+
+/// Refused when signing (now) or at the credential's validFrom, the moment
+/// the verifier will ask about.
+async fn signing_refusal(app: &App, a: &Agreement) -> AppResult<Option<String>> {
+    let credential = a.unsecured();
+    let ty = industry_type(&credential);
+    if let Some(reason) = issue_refusal(app, &a.producer_did, ty, credential["validFrom"].as_str()).await? {
+        return Ok(Some(reason));
+    }
+    issue_refusal(app, &a.producer_did, ty, None).await
+}
+
+fn request_access_url() -> String {
+    format!("{}/request", REGISTRY_URL.get())
+}
+
+/// Each template, with the registry's refusal if this user may not issue it.
+async fn template_permissions<'a>(app: &'a App, did: &str) -> AppResult<Vec<(&'a Template, Option<String>)>> {
+    let mut out = Vec::new();
+    for t in app.templates.iter() {
+        out.push((t, issue_refusal(app, did, &t.credential_type, None).await?));
+    }
+    Ok(out)
+}
+
 // ------------------------------------------------------------------ verify
 
 #[derive(Deserialize)]
@@ -821,17 +924,38 @@ struct VerifyQuery {
     reveal: Option<String>,
 }
 
-/// Online: the registry from the Certificate site and this site's status
-/// list. Offline: neither.
+/// Online: the guild's trust registry (asked over TRQP) and this site's
+/// status list. Offline: neither.
 async fn verify_inputs(app: &App, offline: bool, agreement: Option<Value>) -> AppResult<Inputs> {
     if offline {
         return Ok(Inputs { agreement, ..Default::default() });
     }
-    let registry = match app.http.get(format!("{CERT_SITE}/trqp/registry")).send().await {
-        Ok(r) => r.json::<Value>().await.ok(),
-        Err(_) => None,
-    };
-    Ok(Inputs { registry, status_list: Some(signed_status_list(app).await?), agreement })
+    Ok(Inputs {
+        trqp: Some(trqp_client(app.http.clone())),
+        trusted_authority: Some(registry_authority()),
+        status_list: Some(signed_status_list(app).await?),
+        agreement,
+    })
+}
+
+/// Asks the trust registry `POST /authorization` (TRQP 2.0), passing the
+/// question's time as `context.time`. The verifier is synchronous, so this
+/// blocks on the async client; it runs on the multi-threaded runtime.
+fn trqp_client(http: reqwest::Client) -> TrqpQuery {
+    let handle = tokio::runtime::Handle::current();
+    Box::new(move |q: &TrqpQuestion| {
+        let mut body = json!({ "entity_id": q.entity_id, "authority_id": q.authority_id, "action": q.action, "resource": q.resource });
+        if let Some(time) = q.time {
+            body["context"] = json!({ "time": time });
+        }
+        let (http, handle) = (http.clone(), handle.clone());
+        tokio::task::block_in_place(move || {
+            handle.block_on(async move {
+                let answer: Value = http.post(format!("{REGISTRY_URL}/authorization")).json(&body).send().await?.error_for_status()?.json().await?;
+                answer["authorized"].as_bool().ok_or_else(|| anyhow!("TRQP response has no authorized field"))
+            })
+        })
+    })
 }
 
 async fn verify_agreement(

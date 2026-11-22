@@ -10,11 +10,13 @@
 //   certificate:deliver  { certChainPem, email, issuer } -> { did }
 //   credential:sign      { credential, role, asset, counterparty?, agreementText? } -> { proof }
 //   identity:sign        { toBeSigned, consentHash, asset }          -> { signature }
+//   registry:request     { challenge, permission, entityId }         -> { did, signature }
 //
 // A declined or failed request gets { type: "error", message }.
 
 import "./style.css";
 import {
+  accessRequestMessage,
   b64,
   containsBytes,
   createProof,
@@ -31,6 +33,7 @@ import { history, identities, type Identity } from "./store";
 const SITES: Record<string, string> = {
   [import.meta.env.VITE_CERT_SITE_URL ?? "http://localhost:4001"]: "Certificate site",
   [import.meta.env.VITE_CONSENT_SITE_URL ?? "http://localhost:4003"]: "Consent-o-tron",
+  [import.meta.env.VITE_REGISTRY_URL ?? "http://localhost:4005"]: "Trust Registry",
 };
 const ALLOWED_ORIGINS = new Set(Object.keys(SITES).map((url) => new URL(url).origin));
 
@@ -325,6 +328,26 @@ async function handle(req: Request, origin: string): Promise<Record<string, unkn
       const signature = b64(await signBytes(who.keys.privateKey, toBeSigned));
       await history.add({ at: now(), origin, identityId: who.id, action: "Signed identity assertion", summary: String((req.asset as Record<string, unknown>)?.name ?? "") });
       return { signature };
+    }
+
+    case "registry:request": {
+      // Ask a trust registry for a permission, signing the challenge bound to
+      // that exact permission (the registry's proof-of-possession format).
+      const permission = req.permission as { authority_id: string; action: string; resource: string };
+      const entityId = String(req.entityId ?? "");
+      const who = await approve(
+        origin,
+        "Request permission",
+        `<p>${h(siteName(origin))} will record that you asked for this permission. A guild administrator decides.</p>
+         <dl class="terms"><dt>Action</dt><dd>${h(permission.action)}</dd><dt>Credential</dt><dd>${h(permission.resource)}</dd>
+         <dt>Authority</dt><dd class="mono">${h(permission.authority_id)}</dd></dl>`,
+        { choose: (all) => all.filter((i) => i.did === entityId && i.certChainPem), approveLabel: "Sign request" },
+      );
+      if (!who) throw new Error("declined");
+      if (who.did !== entityId) throw new Error("this identity is not the one signed in to the registry");
+      const signature = b64(await signBytes(who.keys.privateKey, accessRequestMessage(String(req.challenge), who.did, permission)));
+      await history.add({ at: now(), origin, identityId: who.id, action: "Requested permission", summary: `${permission.action} ${permission.resource}` });
+      return { did: who.did, signature };
     }
 
     default:
