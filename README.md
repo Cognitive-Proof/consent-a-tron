@@ -119,5 +119,4 @@ cargo run --bin verify -- out/signed.jpg --agreement out/private-agreement.json
 
 - The `https://cawg.io/consent/v1` context and the schema `$id` URLs don't resolve. `eddsa-jcs-2022` signs JCS-canonical JSON, so no JSON-LD processing is needed.
 - The command-line `verify` reads a local JSON file in place of a TRQP registry, without time-aware answers; the demo sites use the real registry.
-- The admin plugin is vendored in `registry/vendor/` until `@cognitiveproof/cawg-trqp-plugin-admin` is published to npm.
 - Everything in `pki/` and `out/` is test-only.

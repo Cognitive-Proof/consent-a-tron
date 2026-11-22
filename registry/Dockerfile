@@ -3,8 +3,6 @@
 FROM node:22-bookworm-slim AS build
 WORKDIR /app/registry
 COPY registry/package.json registry/package-lock.json ./
-# The admin plugin is vendored until @cognitiveproof/cawg-trqp-plugin-admin is on npm.
-COPY registry/vendor ./vendor
 RUN npm ci --no-fund --no-audit
 COPY registry/tsconfig.json ./
 COPY registry/src ./src
