@@ -97,6 +97,11 @@ export function accessRequestMessage(challenge: string, did: string, permission:
   return utf8(`trqp-access-request:${JSON.stringify([challenge, did, permission.authority_id, permission.action, permission.resource])}`);
 }
 
+/** What a party signs to withdraw consent; the server builds the same bytes. */
+export function withdrawalMessage(challenge: string, credentialId: string, did: string): Bytes {
+  return utf8(`consent-withdrawal:${JSON.stringify([challenge, credentialId, did])}`);
+}
+
 /** Signs a challenge string; servers verify with the same prefix. */
 export async function signChallenge(privateKey: CryptoKey, purpose: string, challenge: string): Promise<string> {
   return b64(await signBytes(privateKey, utf8(`${purpose}:${challenge}`)));

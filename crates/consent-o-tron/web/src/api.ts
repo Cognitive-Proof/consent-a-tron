@@ -54,6 +54,10 @@ export type AgreementView = {
   walletAsset: WalletAsset;
   stage: Stage;
   revoked: boolean;
+  /** Which party withdrew, if one did. */
+  withdrawnBy: "producer" | "cosigner" | null;
+  /** The key this viewer signed the credential with. */
+  signerDid: string | null;
   error: string | null;
   /** The trust registry's reason the next step would be refused, if it would. */
   blocked: string | null;

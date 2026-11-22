@@ -26,7 +26,7 @@ function verdict(report: Report): [string, string, string] {
   const outcomes = report.credentials.flatMap((c) => c.outcomes);
   const has = (code: string) => outcomes.some((o) => short(o.code) === code);
   if (!report.credentials.length) return ["red", "No consent credential", "This file has no CAWG consent credential."];
-  if (has("revoked")) return ["red", "Consent withdrawn", "The person who consented has withdrawn it."];
+  if (has("revoked")) return ["red", "Consent withdrawn", "One of the parties has withdrawn it."];
   if (report.valid && has("status_unchecked"))
     return ["amber", "Valid when signed", "Withdrawal status wasn't checked, so this can't say whether consent still stands."];
   if (report.valid) return ["green", "Consent verified", "The file carries valid consent, signed by both parties, and it hasn't been withdrawn."];
