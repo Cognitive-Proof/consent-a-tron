@@ -35,7 +35,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use cawg_consent_test::{
     add_proof, build_credential, build_status_list, did_key, did_of_vm, hard_binding_sha256, load_ed25519_pem, now, pki, resolve_did_key,
     uuid_v4,
-    verify::{verify_asset, Inputs, Report, TrqpQuery, TrqpQuestion},
+    verify::{industry_type, verify_asset, Inputs, Report, TrqpQuery, TrqpQuestion},
     verify_cert_chain, verify_proofs, CredentialParams,
 };
 use demo_common::{
@@ -416,6 +416,19 @@ async fn home(State(app): State<App>, headers: HeaderMap) -> AppResult<Html<Stri
         .try_collect()
         .await?;
     mine.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    // A registry outage shouldn't hide the button; creating an agreement checks again.
+    let can_create = match template_permissions(&app, &user.did).await {
+        Ok(perms) => perms.iter().any(|(_, refusal)| refusal.is_none()),
+        Err(_) => true,
+    };
+    let new_agreement = if can_create {
+        r#"<a class="button" href="/new">New agreement</a>"#.to_string()
+    } else {
+        format!(
+            r#"<p class="notice">To ask someone for consent you need permission to issue a consent credential. <a href="{}">Request it in the trust registry</a>.</p>"#,
+            esc(request_access_url())
+        )
+    };
     let rows: String = mine
         .iter()
         .map(|a| {
@@ -434,7 +447,7 @@ async fn home(State(app): State<App>, headers: HeaderMap) -> AppResult<Html<Stri
     Ok(SITE.page(
         "Your agreements",
         &format!(
-            r#"<p class="muted">Signed in as {}</p><div class="row"><a class="button" href="/new">New agreement</a><a href="/verify">Verify a file</a></div>
+            r#"<p class="muted">Signed in as {}</p><div class="row">{new_agreement}<a href="/verify">Verify a file</a></div>
 {}"#,
             esc(&user.email),
             if rows.is_empty() { "<p class=\"muted\">No agreements yet.</p>".into() } else { rows }
@@ -445,19 +458,25 @@ async fn home(State(app): State<App>, headers: HeaderMap) -> AppResult<Html<Stri
 // ------------------------------------------------------------------ producer: create
 
 async fn new_agreement(State(app): State<App>, headers: HeaderMap) -> AppResult<Response> {
-    if current_user(&app, &headers).await?.is_none() {
+    let Some(user) = current_user(&app, &headers).await? else {
         return Ok(Redirect::to("/").into_response());
-    }
-    let cards: String = app
-        .templates
-        .iter()
-        .map(|t| {
-            format!(
+    };
+    let cards: String = template_permissions(&app, &user.did)
+        .await?
+        .into_iter()
+        .map(|(t, refusal)| match refusal {
+            None => format!(
                 r#"<a class="card" style="display:block;color:inherit;text-decoration:none" href="/new/{}"><strong>{}</strong><p class="muted">{}</p></a>"#,
                 esc(&t.id),
                 esc(&t.title),
                 esc(&t.description)
-            )
+            ),
+            Some(reason) => format!(
+                r#"<div class="card"><strong>{}</strong><p class="muted">{}</p>{}</div>"#,
+                esc(&t.title),
+                esc(&t.description),
+                not_authorized_html(&t.credential_type, &reason)
+            ),
         })
         .collect();
     Ok(SITE.page("Choose an agreement", &cards).into_response())
@@ -501,10 +520,13 @@ fn field_html(f: &Field, prefix: &str) -> String {
 }
 
 async fn template_form(State(app): State<App>, headers: HeaderMap, UrlPath(tid): UrlPath<String>) -> AppResult<Response> {
-    if current_user(&app, &headers).await?.is_none() {
+    let Some(user) = current_user(&app, &headers).await? else {
         return Ok(Redirect::to("/").into_response());
-    }
+    };
     let t = app.templates.iter().find(|t| t.id == tid).ok_or_else(|| anyhow!("unknown template"))?;
+    if let Some(reason) = issue_refusal(&app, &user.did, &t.credential_type, None).await? {
+        return Ok(SITE.page(&t.title, &not_authorized_html(&t.credential_type, &reason)).into_response());
+    }
     let public: String = t.public.iter().map(|f| field_html(f, "public.")).collect();
     let private: String = t.private.iter().map(|f| field_html(f, "private.")).collect();
     Ok(SITE
@@ -536,6 +558,17 @@ async fn create_agreement(
 ) -> AppResult<Redirect> {
     let user = current_user(&app, &headers).await?.ok_or_else(|| forbidden("sign in first"))?;
     let t = app.templates.iter().find(|t| t.id == tid).ok_or_else(|| anyhow!("unknown template"))?.clone();
+    // Check 1: before any work, and before the cosigner is asked for anything.
+    // Ask about the exact validFrom the credential will carry (whole seconds),
+    // since that's the moment the verifier asks about.
+    let valid_from = now();
+    if let Some(reason) = issue_refusal(&app, &user.did, &t.credential_type, Some(&valid_from)).await? {
+        return Err(forbidden(&format!(
+            "you aren't authorized to issue {} in the trust registry ({reason}); request access at {}",
+            t.credential_type,
+            request_access_url()
+        )));
+    }
 
     let mut values: HashMap<String, Vec<String>> = HashMap::new();
     let (mut asset, mut asset_name) = (Vec::new(), String::new());
@@ -597,7 +630,7 @@ async fn create_agreement(
         consent: Value::Object(consent),
         agreement: &agreement_doc,
         salt: &salt,
-        valid_from: &now(),
+        valid_from: &valid_from,
     })?;
 
     let id = uuid_v4();
@@ -698,6 +731,29 @@ async fn agreement_page(
         id = esc(&a.id),
     );
 
+    // Checks 2 and 3 refuse these steps; say so before anyone opens their wallet.
+    // A registry outage doesn't block the page, since the steps check again.
+    let blocked = match (&who, a.stage) {
+        (Viewer::Producer, Stage::AwaitingProducer) => signing_refusal(&app, &a).await.ok().flatten().map(|reason| {
+            format!(
+                r#"<p class="notice warn">You aren't authorized to issue this credential in the trust registry ({}), so it can't be signed. <a href="{}">Request access</a>.</p>"#,
+                esc(&reason),
+                esc(request_access_url())
+            )
+        }),
+        (Viewer::Producer | Viewer::Cosigner(_), Stage::AwaitingCosigner) => issue_refusal(&app, &a.producer_did, industry_type(&a.unsecured()), None)
+            .await
+            .ok()
+            .flatten()
+            .map(|reason| {
+                format!(
+                    r#"<p class="notice warn">{} is no longer authorized to issue this credential in the trust registry ({}), so consent can't be given and no file will be written.</p>"#,
+                    esc(&a.producer_email),
+                    esc(&reason)
+                )
+            }),
+        _ => None,
+    };
     let action = match (&who, a.stage) {
         (Viewer::Producer, Stage::AwaitingProducer) => format!(
             r#"<div class="card"><p>Sign the consent request with your wallet. Consent-o-tron then emails <strong>{}</strong>.</p>
@@ -800,6 +856,7 @@ document.getElementById("consent").onclick = async () => {{
         }
         _ => String::new(),
     };
+    let action = blocked.unwrap_or(action);
     Ok(SITE.page(&a.title, &format!("{action}{summary}")))
 }
 
@@ -847,6 +904,13 @@ async fn producer_proof(State(app): State<App>, headers: HeaderMap, UrlPath(id):
     if did_of_vm(body.proof["verificationMethod"].as_str().unwrap_or_default()) != a.producer_did {
         return Err(anyhow!("the proof must be made by the issuer").into());
     }
+    // Check 2: the producer may still issue it, both now and as of validFrom.
+    if let Some(reason) = signing_refusal(&app, &a).await? {
+        return Err(forbidden(&format!(
+            "you aren't authorized to issue this credential in the trust registry ({reason}), so it wasn't sent for consent; request access at {}",
+            request_access_url()
+        )));
+    }
     set(&app, &id, doc! { "producer_proof": body.proof.to_string(), "stage": "awaiting_cosigner" }).await?;
     app.mailer
         .send(
@@ -891,6 +955,14 @@ async fn participant_proof(State(app): State<App>, UrlPath(id): UrlPath<String>,
     let chain = a.cosigner_chain_pem.clone().ok_or_else(|| anyhow!("connect your wallet first"))?;
     if check_proof(&a, &body.proof)? != resolve_did_key(&cosigner)?.to_bytes() {
         return Err(anyhow!("the consent must be signed by the identity you connected").into());
+    }
+    // Check 3: the producer may have been revoked since signing. Don't record
+    // consent or write a file for a credential its issuer can no longer issue.
+    if let Some(reason) = issue_refusal(&app, &a.producer_did, industry_type(&a.unsecured()), None).await? {
+        return Err(forbidden(&format!(
+            "{} is no longer authorized to issue this credential ({reason}), so your consent wasn't recorded and no file was written",
+            a.producer_email
+        )));
     }
     set(&app, &id, doc! { "participant_proof": body.proof.to_string(), "stage": "authoring" }).await?;
 
@@ -993,6 +1065,67 @@ async fn signed_status_list(app: &App) -> AppResult<Value> {
 
 async fn status_list(State(app): State<App>) -> AppResult<Json<Value>> {
     Ok(Json(signed_status_list(&app).await?))
+}
+
+// ------------------------------------------------------------------ issuing permission
+
+/// The trust registry's reason for refusing `did` permission to issue
+/// `credential_type` at `time` (None: now), or None if it is authorized. It
+/// asks exactly what the verifier asks (verify::check_issuer), so Consent-o-tron
+/// refuses up front what verification would reject later.
+async fn issue_refusal(app: &App, did: &str, credential_type: &str, time: Option<&str>) -> AppResult<Option<String>> {
+    let mut body = json!({ "entity_id": did, "authority_id": registry_authority(), "action": "issue", "resource": credential_type });
+    if let Some(time) = time {
+        body["context"] = json!({ "time": time });
+    }
+    let answer: Value = app
+        .http
+        .post(format!("{REGISTRY_URL}/authorization"))
+        .json(&body)
+        .send()
+        .await
+        .and_then(|r| r.error_for_status())
+        .context("the trust registry could not be asked")?
+        .json()
+        .await?;
+    match answer["authorized"].as_bool() {
+        Some(true) => Ok(None),
+        Some(false) => Ok(Some(answer["reason"].as_str().unwrap_or("not_authorized").to_string())),
+        None => Err(anyhow!("the trust registry's answer has no authorized field").into()),
+    }
+}
+
+/// Refused when signing (now) or at the credential's validFrom, the moment
+/// the verifier will ask about.
+async fn signing_refusal(app: &App, a: &Agreement) -> AppResult<Option<String>> {
+    let credential = a.unsecured();
+    let ty = industry_type(&credential);
+    if let Some(reason) = issue_refusal(app, &a.producer_did, ty, credential["validFrom"].as_str()).await? {
+        return Ok(Some(reason));
+    }
+    issue_refusal(app, &a.producer_did, ty, None).await
+}
+
+fn request_access_url() -> String {
+    format!("{}/request", REGISTRY_URL.get())
+}
+
+fn not_authorized_html(credential_type: &str, reason: &str) -> String {
+    format!(
+        r#"<p class="notice warn">You aren't authorized to issue <strong>{}</strong> in the trust registry ({}). <a href="{}">Request access</a>; once an administrator approves it, you can create this agreement.</p>"#,
+        esc(credential_type),
+        esc(reason),
+        esc(request_access_url())
+    )
+}
+
+/// Each template, with the registry's refusal if this user may not issue it.
+async fn template_permissions<'a>(app: &'a App, did: &str) -> AppResult<Vec<(&'a Template, Option<String>)>> {
+    let mut out = Vec::new();
+    for t in app.templates.iter() {
+        out.push((t, issue_refusal(app, did, &t.credential_type, None).await?));
+    }
+    Ok(out)
 }
 
 // ------------------------------------------------------------------ verify

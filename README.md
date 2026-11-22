@@ -29,6 +29,12 @@ Four sites show the flow with real people.
 - **Same site required.** An embedded wallet can reach its keys only when the wallet and the sites are the same site. `localhost:*` is; in production, use subdomains of one domain, not separate `*.run.app` URLs.
 - **Credential subject.** It is `mailto:<email>`: the producer signs before the person consenting has connected a wallet. The verifier requires the identity signer's certificate to carry that email, and the participant proof to use that certificate's key.
 - **Trust registry.** Credentials name the registry's `did:web` authority. Consent-o-tron's verifier asks it two TRQP questions: was the issuer authorized to `issue` at the credential's `validFrom` (`context.time`), and may the status list's signer `publish-status`. Answers are time-aware, so revoking a producer stops new credentials but consent given while they were authorized stays valid.
+- **Issuing checks.** Consent-o-tron asks the registry the same `issue` question before it issues, so a producer can't make a credential the verifier would reject:
+  1. When creating an agreement, at the `validFrom` the credential will carry. Producers without permission see a link to request access instead of the agreement form.
+  2. When the producer signs, both at `validFrom` and now, so access revoked after creating the agreement stops it being sent for consent.
+  3. Before recording the cosigner's consent and writing the file, now. A producer revoked after signing can't finish the file, even though the verifier, asking about `validFrom`, would still accept it.
+
+  A registry outage blocks these steps rather than skipping the check.
 - **Identity signature.** Consent-o-tron builds the manifest with c2pa-rs. The identity signature comes from a `RawSigner` that waits for the person's wallet ([authoring.rs](crates/consent-o-tron/src/authoring.rs)). The wallet signs only if the bytes reference `cawg.consent`. For the exact assertion hash it relies on Consent-o-tron.
 
 **Storage:**
