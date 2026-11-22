@@ -77,20 +77,24 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          build-args: BIN=cert-site
+          target: cert-site
           push: true
           tags: ${{ env.REGISTRY }}/cert-site:${{ github.sha }}
-          cache-from: type=gha,scope=cert-site
+          cache-from: |
+            type=gha,scope=cert-site
+            type=gha,scope=consent-o-tron
           cache-to: type=gha,mode=max,scope=cert-site
 
       - name: Build consent-o-tron
         uses: docker/build-push-action@v6
         with:
           context: .
-          build-args: BIN=consent-o-tron
+          target: consent-o-tron
           push: true
           tags: ${{ env.REGISTRY }}/consent-o-tron:${{ github.sha }}
-          cache-from: type=gha,scope=consent-o-tron
+          cache-from: |
+            type=gha,scope=cert-site
+            type=gha,scope=consent-o-tron
           cache-to: type=gha,mode=max,scope=consent-o-tron
 
       - name: Build wallet
