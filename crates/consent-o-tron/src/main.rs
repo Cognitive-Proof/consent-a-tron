@@ -1,13 +1,16 @@
-//! Consent-o-tron (http://localhost:4003).
+//! Consent-O-Tron (http://localhost:4003).
 //!
-//! Producer: sign in with wallet → pick an agreement template → fill it in,
-//! upload the file, name the person giving consent → sign the credential.
-//! Cosigner: open the emailed link → review terms, agreement and file →
-//! consent with their wallet → their wallet also signs the CAWG identity
-//! assertion while Consent-o-tron authors the final file.
+//! The pages are a React app in web/, built to web/dist; this server
+//! returns its index.html for every page route and answers its JSON API.
 //!
-//! Consent-o-tron also runs the status list (withdrawal) under its own
-//! service key, and verifies any file on /verify.
+//! Producer: sign in with wallet → pick an agreement template → upload the
+//! file, name the person giving consent, fill in the terms → sign the
+//! credential. Cosigner: open the emailed link → review terms, agreement
+//! and file → consent with their wallet → their wallet also signs the CAWG
+//! identity assertion while Consent-O-Tron authors the final file.
+//!
+//! Consent-O-Tron also runs the status list (withdrawal) under its own
+//! service key, and verifies any file.
 //!
 //! Records live in MongoDB (`agreements`, `sessions`, `challenges`,
 //! `counters`, `outbox`); uploaded and signed files in the GCS bucket (or
@@ -18,7 +21,7 @@ mod authoring;
 
 use std::{
     collections::HashMap,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
@@ -27,7 +30,7 @@ use authoring::{IdentityRequest, WalletSigner};
 use axum::{
     extract::{DefaultBodyLimit, Multipart, Path as UrlPath, Query, State},
     http::{header, HeaderMap, StatusCode},
-    response::{Html, IntoResponse, Redirect, Response},
+    response::{Html, IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -39,30 +42,35 @@ use cawg_consent_test::{
     verify_cert_chain, verify_proofs, CredentialParams,
 };
 use demo_common::{
-    esc,
     mongodb::{
         bson::{doc, Document},
         options::{FindOneAndUpdateOptions, ReturnDocument},
         Collection,
     },
-    registry_authority, script_json, Blobs, Mailer, Site, CERT_SITE, CONSENT_SITE, REGISTRY_URL,
+    registry_authority, Blobs, Mailer, CERT_SITE, CONSENT_SITE, REGISTRY_URL,
 };
 use ed25519_dalek::{Signature, SigningKey, Verifier};
 use futures_util::TryStreamExt;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tower_http::services::ServeDir;
 
-const SITE: Site = Site { class: "consent", name: "Consent-o-tron" };
 const MAX_UPLOAD: usize = 25 * 1024 * 1024;
 
 // ------------------------------------------------------------------ data
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Template {
     id: String,
     title: String,
     description: String,
+    /// Gallery grouping, e.g. "Editorial".
+    #[serde(default)]
+    category: String,
+    /// Date the template last changed, YYYY-MM-DD.
+    #[serde(default)]
+    updated: String,
     public: Vec<Field>,
     private: Vec<Field>,
     agreement: String,
@@ -72,7 +80,7 @@ struct Template {
     schema_id: String,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Field {
     name: String,
     label: String,
@@ -110,7 +118,7 @@ struct Agreement {
     asset_hash: String,
     /// The unsecured credential, as JSON text so it round-trips byte-exact.
     credential: String,
-    /// `{ salt, agreement }`, kept by Consent-o-tron for the parties.
+    /// `{ salt, agreement }`, kept by Consent-O-Tron for the parties.
     private_agreement: String,
     agreement_text: String,
     producer_proof: Option<String>,
@@ -146,6 +154,11 @@ impl Agreement {
 
     fn public_terms(&self) -> Value {
         self.unsecured()["credentialSubject"]["consent"].clone()
+    }
+
+    /// What the wallet shows about the file; it loads the image from this URL.
+    fn wallet_asset(&self) -> Value {
+        json!({ "name": self.asset_name, "hash": self.asset_hash, "thumbnail": format!("{CONSENT_SITE}/a/{}/asset", self.id) })
     }
 }
 
@@ -199,6 +212,10 @@ fn forbidden(msg: &str) -> AppError {
     AppError(StatusCode::FORBIDDEN, anyhow!(msg.to_string()))
 }
 
+fn unauthorized() -> AppError {
+    AppError(StatusCode::UNAUTHORIZED, anyhow!("log in first"))
+}
+
 // ------------------------------------------------------------------ main
 
 #[tokio::main]
@@ -230,32 +247,40 @@ async fn main() -> anyhow::Result<()> {
         root,
     };
 
-    let router = Router::new()
-        .route("/", get(home))
-        .route("/new", get(new_agreement))
-        .route("/new/{template}", get(template_form).post(create_agreement))
-        .route("/a/{id}", get(agreement_page))
+    let mut router = Router::new();
+    for page in ["/", "/demo", "/agreements", "/new/{template}", "/a/{id}", "/a/{id}/verify", "/verify", "/outbox"] {
+        router = router.route(page, get(web_index));
+    }
+    let router = router
         .route("/a/{id}/asset", get(asset))
         .route("/a/{id}/signed.jpg", get(signed_file))
-        .route("/a/{id}/verify", get(verify_agreement))
-        .route("/a/{id}/withdraw", post(withdraw))
-        .route("/verify", get(verify_form).post(verify_upload))
         .route("/status/1", get(status_list))
         .route("/api/challenge", get(challenge))
         .route("/api/login", post(login))
+        .route("/api/logout", post(logout))
+        .route("/api/me", get(me))
+        .route("/api/config", get(config))
+        .route("/api/templates", get(templates_list))
+        .route("/api/permissions", get(permissions))
+        .route("/api/agreements", get(agreements_list).post(create_agreement))
+        .route("/api/a/{id}", get(agreement_view))
         .route("/api/a/{id}/producer-proof", post(producer_proof))
         .route("/api/a/{id}/cosigner", post(cosigner_connect))
         .route("/api/a/{id}/participant-proof", post(participant_proof))
         .route("/api/a/{id}/status", get(agreement_status))
         .route("/api/a/{id}/identity-signature", post(identity_signature))
-        .route("/outbox", get(outbox))
-        .route("/static/style.css", get(demo_common::style_css))
+        .route("/api/a/{id}/withdraw", post(withdraw))
+        .route("/api/a/{id}/verify", get(verify_agreement))
+        .route("/api/verify", post(verify_upload))
+        .route("/api/outbox", get(outbox))
         .route("/static/wallet-client.js", get(demo_common::wallet_client_js))
+        // Built assets, the mascot and favicons.
+        .fallback_service(ServeDir::new(web_dist(&app.root)))
         .layer(DefaultBodyLimit::max(MAX_UPLOAD + 64 * 1024))
         .with_state(app.clone());
 
     println!(
-        "Consent-o-tron on {CONSENT_SITE}  (files: {}, email: {}, status list signer {})",
+        "Consent-O-Tron on {CONSENT_SITE}  (files: {}, email: {}, status list signer {})",
         app.blobs.description,
         if app.mailer.uses_resend() { "Resend" } else { "outbox only" },
         did_key(&app.service_key.verifying_key()),
@@ -263,6 +288,21 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(demo_common::listen_addr(4003)).await?;
     axum::serve(listener, router).await?;
     Ok(())
+}
+
+// ------------------------------------------------------------------ pages
+
+fn web_dist(root: &Path) -> PathBuf {
+    root.join("crates/consent-o-tron/web/dist")
+}
+
+/// The React app's page; it picks what to show from the path.
+async fn web_index(State(app): State<App>) -> AppResult<Html<String>> {
+    let path = web_dist(&app.root).join("index.html");
+    let html = tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|e| anyhow!("{}: {e} (run `npm run build` in crates/consent-o-tron/web)", path.display()))?;
+    Ok(Html(html))
 }
 
 // ------------------------------------------------------------------ helpers
@@ -279,13 +319,16 @@ async fn set(app: &App, id: &str, fields: Document) -> AppResult<()> {
     Ok(())
 }
 
-async fn current_user(app: &App, headers: &HeaderMap) -> AppResult<Option<WebSession>> {
-    let token = headers
+fn session_token(headers: &HeaderMap) -> Option<String> {
+    headers
         .get(header::COOKIE)
         .and_then(|c| c.to_str().ok())
         .and_then(|c| c.split(';').map(str::trim).find_map(|kv| kv.strip_prefix("cot=")))
-        .map(str::to_string);
-    Ok(match token {
+        .map(str::to_string)
+}
+
+async fn current_user(app: &App, headers: &HeaderMap) -> AppResult<Option<WebSession>> {
+    Ok(match session_token(headers) {
         Some(t) => app.sessions.find_one(doc! { "_id": t }).await?,
         None => None,
     })
@@ -326,42 +369,13 @@ async fn check_login(app: &App, login: &WalletLogin) -> AppResult<Verified> {
     let chain_pem = login
         .cert_chain_pem
         .clone()
-        .ok_or_else(|| anyhow!("this identity has no certificate yet; get one on the Certificate site"))?;
+        .ok_or_else(|| anyhow!("this identity has no certificate yet; get one from NotSSL"))?;
     let cert = verify_cert_chain(&chain_pem, &pki(&app.root, "cawg-root.pem")?)?;
     if cert.ed25519_key != key.to_bytes() {
         return Err(anyhow!("certificate is for a different key").into());
     }
     let email = cert.emails.first().cloned().ok_or_else(|| anyhow!("certificate has no email"))?;
     Ok(Verified { did: login.did.clone(), email: email.to_lowercase(), chain_pem })
-}
-
-fn terms_html(terms: &Value) -> String {
-    let rows: String = terms
-        .as_object()
-        .into_iter()
-        .flatten()
-        .map(|(k, v)| {
-            let v = match v {
-                Value::Array(a) => a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", "),
-                Value::String(s) => s.clone(),
-                other => other.to_string(),
-            };
-            format!("<dt>{}</dt><dd>{}</dd>", esc(k), esc(v))
-        })
-        .collect();
-    format!(r#"<dl class="terms">{rows}</dl>"#)
-}
-
-fn stage_badge(a: &Agreement) -> String {
-    let (class, text) = match (a.stage, a.revoked) {
-        (_, true) => ("fail", "Consent withdrawn"),
-        (Stage::AwaitingProducer, _) => ("", "Waiting for producer signature"),
-        (Stage::AwaitingCosigner, _) => ("", "Waiting for consent"),
-        (Stage::Authoring, _) => ("", "Writing file"),
-        (Stage::Signed, _) => ("ok", "Signed"),
-        (Stage::Failed, _) => ("fail", "Failed"),
-    };
-    format!(r#"<span class="badge {class}">{text}</span>"#)
 }
 
 // ------------------------------------------------------------------ sign in
@@ -375,39 +389,52 @@ async fn challenge(State(app): State<App>) -> AppResult<Json<Value>> {
 async fn login(State(app): State<App>, Json(login): Json<WalletLogin>) -> AppResult<Response> {
     let who = check_login(&app, &login).await?;
     let token = uuid_v4();
+    let body = json!({ "email": who.email, "did": who.did });
     app.sessions.insert_one(WebSession { token: token.clone(), did: who.did, email: who.email }).await?;
-    Ok(([(header::SET_COOKIE, format!("cot={token}; Path=/; HttpOnly; SameSite=Lax"))], Json(json!({ "ok": true }))).into_response())
+    Ok(([(header::SET_COOKIE, format!("cot={token}; Path=/; HttpOnly; SameSite=Lax"))], Json(body)).into_response())
 }
 
-const SIGN_IN_JS: &str = r#"<script type="module">
-import { WalletSession, postJson } from "/static/wallet-client.js";
-const status = document.getElementById("status");
-document.getElementById("signin").onclick = async () => {
-  const wallet = new WalletSession();
-  try {
-    await wallet.open();
-    const { challenge } = await (await fetch("/api/challenge")).json();
-    status.textContent = "Choose an identity in your wallet…";
-    const who = await wallet.request("connect", { challenge });
-    await postJson("/api/login", { challenge, ...who });
-    wallet.close();
-    location.reload();
-  } catch (err) { status.textContent = err.message; wallet.close(); }
-};
-</script>"#;
+async fn logout(State(app): State<App>, headers: HeaderMap) -> AppResult<Response> {
+    if let Some(token) = session_token(&headers) {
+        app.sessions.delete_one(doc! { "_id": token }).await?;
+    }
+    Ok(([(header::SET_COOKIE, "cot=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0")], Json(json!({ "ok": true }))).into_response())
+}
 
-async fn home(State(app): State<App>, headers: HeaderMap) -> AppResult<Html<String>> {
-    let Some(user) = current_user(&app, &headers).await? else {
-        return Ok(SITE.page(
-            "Consent, on the record",
-            &format!(
-                r#"<p>Ask someone for consent to use their image, likeness or voice in a file. Both of you sign, and the consent travels inside the file as a verifiable credential.</p>
-<div class="card"><p>Sign in with your wallet. You need a certificate from the <a href="{CERT_SITE}">Certificate site</a> first.</p>
-<div class="row actions"><button id="signin">Sign in with wallet</button></div><p id="status" class="muted"></p></div>
-<p><a href="/verify">Verify a file</a></p>{SIGN_IN_JS}"#
-            ),
-        ));
-    };
+async fn me(State(app): State<App>, headers: HeaderMap) -> AppResult<Json<Value>> {
+    Ok(Json(match current_user(&app, &headers).await? {
+        Some(u) => json!({ "email": u.email, "did": u.did }),
+        None => Value::Null,
+    }))
+}
+
+/// Site URLs the pages link to, which differ per deployment.
+async fn config() -> Json<Value> {
+    Json(json!({ "certSite": CERT_SITE.get(), "requestAccess": request_access_url() }))
+}
+
+/// Which templates the signed-in producer may issue, as the trust registry
+/// answers now: template id → null, or the registry's reason for refusing.
+/// `unavailable` when the registry can't be asked; creating checks again.
+async fn permissions(State(app): State<App>, headers: HeaderMap) -> AppResult<Json<Value>> {
+    let user = current_user(&app, &headers).await?.ok_or_else(unauthorized)?;
+    Ok(Json(match template_permissions(&app, &user.did).await {
+        Ok(perms) => json!({
+            "unavailable": false,
+            "refusals": perms.into_iter().map(|(t, refusal)| (t.id.clone(), json!(refusal))).collect::<serde_json::Map<_, _>>(),
+        }),
+        Err(_) => json!({ "unavailable": true, "refusals": {} }),
+    }))
+}
+
+// ------------------------------------------------------------------ producer: create
+
+async fn templates_list(State(app): State<App>) -> Json<Vec<Template>> {
+    Json(app.templates.to_vec())
+}
+
+async fn agreements_list(State(app): State<App>, headers: HeaderMap) -> AppResult<Json<Value>> {
+    let user = current_user(&app, &headers).await?.ok_or_else(unauthorized)?;
     // Sorted here rather than in the query, so Firestore needs no composite index.
     let mut mine: Vec<Agreement> = app
         .agreements
@@ -416,159 +443,28 @@ async fn home(State(app): State<App>, headers: HeaderMap) -> AppResult<Html<Stri
         .try_collect()
         .await?;
     mine.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-    // A registry outage shouldn't hide the button; creating an agreement checks again.
-    let can_create = match template_permissions(&app, &user.did).await {
-        Ok(perms) => perms.iter().any(|(_, refusal)| refusal.is_none()),
-        Err(_) => true,
-    };
-    let new_agreement = if can_create {
-        r#"<a class="button" href="/new">New agreement</a>"#.to_string()
-    } else {
-        format!(
-            r#"<p class="notice">To ask someone for consent you need permission to issue a consent credential. <a href="{}">Request it in the trust registry</a>.</p>"#,
-            esc(request_access_url())
-        )
-    };
-    let rows: String = mine
+    let items: Vec<Value> = mine
         .iter()
         .map(|a| {
-            format!(
-                r#"<article class="card"><div class="row"><strong><a href="/a/{id}">{}</a></strong>{}</div>
-<div class="muted">{} · {} · {}</div></article>"#,
-                esc(&a.title),
-                stage_badge(a),
-                esc(&a.asset_name),
-                if a.producer_did == user.did { format!("with {}", esc(&a.cosigner_email)) } else { format!("from {}", esc(&a.producer_email)) },
-                esc(&a.created_at),
-                id = esc(&a.id),
-            )
+            let producer = a.producer_did == user.did;
+            json!({
+                "id": a.id,
+                "title": a.title,
+                "templateId": a.template_id,
+                "assetName": a.asset_name,
+                "role": if producer { "producer" } else { "cosigner" },
+                "counterparty": if producer { &a.cosigner_email } else { &a.producer_email },
+                "stage": a.stage,
+                "revoked": a.revoked,
+                "createdAt": a.created_at,
+            })
         })
         .collect();
-    Ok(SITE.page(
-        "Your agreements",
-        &format!(
-            r#"<p class="muted">Signed in as {}</p><div class="row">{new_agreement}<a href="/verify">Verify a file</a></div>
-{}"#,
-            esc(&user.email),
-            if rows.is_empty() { "<p class=\"muted\">No agreements yet.</p>".into() } else { rows }
-        ),
-    ))
+    Ok(Json(json!(items)))
 }
 
-// ------------------------------------------------------------------ producer: create
-
-async fn new_agreement(State(app): State<App>, headers: HeaderMap) -> AppResult<Response> {
-    let Some(user) = current_user(&app, &headers).await? else {
-        return Ok(Redirect::to("/").into_response());
-    };
-    let cards: String = template_permissions(&app, &user.did)
-        .await?
-        .into_iter()
-        .map(|(t, refusal)| match refusal {
-            None => format!(
-                r#"<a class="card" style="display:block;color:inherit;text-decoration:none" href="/new/{}"><strong>{}</strong><p class="muted">{}</p></a>"#,
-                esc(&t.id),
-                esc(&t.title),
-                esc(&t.description)
-            ),
-            Some(reason) => format!(
-                r#"<div class="card"><strong>{}</strong><p class="muted">{}</p>{}</div>"#,
-                esc(&t.title),
-                esc(&t.description),
-                not_authorized_html(&t.credential_type, &reason)
-            ),
-        })
-        .collect();
-    Ok(SITE.page("Choose an agreement", &cards).into_response())
-}
-
-fn field_html(f: &Field, prefix: &str) -> String {
-    let name = format!("{prefix}{}", f.name);
-    match f.kind.as_str() {
-        "multiselect" => {
-            let selected: Vec<&str> = f.default.as_array().map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
-            let boxes: String = f
-                .options
-                .iter()
-                .map(|o| {
-                    format!(
-                        r#"<label style="display:inline-flex;gap:6px;margin-right:14px;font-weight:400"><input type="checkbox" style="width:auto" name="{}" value="{}" {}/>{}</label>"#,
-                        esc(&name),
-                        esc(o),
-                        if selected.contains(&o.as_str()) { "checked " } else { "" },
-                        esc(o)
-                    )
-                })
-                .collect();
-            format!(r#"<fieldset style="border:0;padding:0;margin:12px 0"><legend style="font-weight:500">{}</legend>{boxes}</fieldset>"#, esc(&f.label))
-        }
-        "select" => {
-            let opts: String = f
-                .options
-                .iter()
-                .map(|o| format!(r#"<option {}>{}</option>"#, if f.default == o.as_str() { "selected" } else { "" }, esc(o)))
-                .collect();
-            format!(r#"<label>{}<select name="{}">{opts}</select></label>"#, esc(&f.label), esc(&name))
-        }
-        _ => format!(
-            r#"<label>{}<input name="{}" value="{}" required /></label>"#,
-            esc(&f.label),
-            esc(&name),
-            esc(f.default.as_str().unwrap_or_default())
-        ),
-    }
-}
-
-async fn template_form(State(app): State<App>, headers: HeaderMap, UrlPath(tid): UrlPath<String>) -> AppResult<Response> {
-    let Some(user) = current_user(&app, &headers).await? else {
-        return Ok(Redirect::to("/").into_response());
-    };
-    let t = app.templates.iter().find(|t| t.id == tid).ok_or_else(|| anyhow!("unknown template"))?;
-    if let Some(reason) = issue_refusal(&app, &user.did, &t.credential_type, None).await? {
-        return Ok(SITE.page(&t.title, &not_authorized_html(&t.credential_type, &reason)).into_response());
-    }
-    let public: String = t.public.iter().map(|f| field_html(f, "public.")).collect();
-    let private: String = t.private.iter().map(|f| field_html(f, "private.")).collect();
-    Ok(SITE
-        .page(
-            &t.title,
-            &format!(
-                r#"<p class="muted">{}</p>
-<form class="card" method="post" enctype="multipart/form-data">
-  <h2>The file</h2>
-  <label>Image (JPEG, up to 25 MB)<input type="file" name="asset" accept="image/jpeg" required /></label>
-  <h2>Who is giving consent</h2>
-  <label>Their email<input type="email" name="cosigner_email" required placeholder="performer@example.com" /></label>
-  <p class="muted">The credential names them by this email; it must match the email on their certificate.</p>
-  <h2>Public terms</h2><p class="muted">Anyone who has the file can read these.</p>{public}
-  <h2>Private terms</h2><p class="muted">Only a salted hash goes in the file. The text stays between you and the person consenting.</p>{private}
-  <div class="row actions"><button>Create credential</button></div>
-</form>"#,
-                esc(&t.description)
-            ),
-        )
-        .into_response())
-}
-
-async fn create_agreement(
-    State(app): State<App>,
-    headers: HeaderMap,
-    UrlPath(tid): UrlPath<String>,
-    mut form: Multipart,
-) -> AppResult<Redirect> {
-    let user = current_user(&app, &headers).await?.ok_or_else(|| forbidden("sign in first"))?;
-    let t = app.templates.iter().find(|t| t.id == tid).ok_or_else(|| anyhow!("unknown template"))?.clone();
-    // Check 1: before any work, and before the cosigner is asked for anything.
-    // Ask about the exact validFrom the credential will carry (whole seconds),
-    // since that's the moment the verifier asks about.
-    let valid_from = now();
-    if let Some(reason) = issue_refusal(&app, &user.did, &t.credential_type, Some(&valid_from)).await? {
-        return Err(forbidden(&format!(
-            "you aren't authorized to issue {} in the trust registry ({reason}); request access at {}",
-            t.credential_type,
-            request_access_url()
-        )));
-    }
+async fn create_agreement(State(app): State<App>, headers: HeaderMap, mut form: Multipart) -> AppResult<Json<Value>> {
+    let user = current_user(&app, &headers).await?.ok_or_else(unauthorized)?;
 
     let mut values: HashMap<String, Vec<String>> = HashMap::new();
     let (mut asset, mut asset_name) = (Vec::new(), String::new());
@@ -580,6 +476,19 @@ async fn create_agreement(
         } else {
             values.entry(name).or_default().push(field.text().await?);
         }
+    }
+    let tid = values.get("template").and_then(|v| v.first()).cloned().unwrap_or_default();
+    let t = app.templates.iter().find(|t| t.id == tid).ok_or_else(|| anyhow!("unknown template"))?.clone();
+    // Check 1: before any work, and before the cosigner is asked for anything.
+    // Ask about the exact validFrom the credential will carry (whole seconds),
+    // since that's the moment the verifier asks about.
+    let valid_from = now();
+    if let Some(reason) = issue_refusal(&app, &user.did, &t.credential_type, Some(&valid_from)).await? {
+        return Err(forbidden(&format!(
+            "you aren't authorized to issue {} in the trust registry ({reason}); request access at {}",
+            t.credential_type,
+            request_access_url()
+        )));
     }
     if asset.len() < 4 || asset[..3] != [0xff, 0xd8, 0xff] {
         return Err(anyhow!("please upload a JPEG image").into());
@@ -663,7 +572,7 @@ async fn create_agreement(
             signed_key: None,
         })
         .await?;
-    Ok(Redirect::to(&format!("/a/{id}")))
+    Ok(Json(json!({ "id": id })))
 }
 
 async fn next_status_index(app: &App) -> AppResult<usize> {
@@ -676,7 +585,7 @@ async fn next_status_index(app: &App) -> AppResult<usize> {
     Ok(counter.get_i64("next")? as usize)
 }
 
-// ------------------------------------------------------------------ agreement page
+// ------------------------------------------------------------------ agreement view
 
 #[derive(Deserialize)]
 struct InviteQuery {
@@ -685,179 +594,66 @@ struct InviteQuery {
 
 enum Viewer {
     Producer,
+    /// With the invitation token, which the cosigner's API calls carry.
     Cosigner(String),
     Other,
 }
 
+/// The cosigner is whoever has the emailed invitation, or is signed in
+/// with a certificate for the email the agreement names.
 async fn viewer(app: &App, headers: &HeaderMap, a: &Agreement, invite: Option<&str>) -> AppResult<Viewer> {
     if invite == Some(a.invite_token.as_str()) {
         return Ok(Viewer::Cosigner(a.invite_token.clone()));
     }
     Ok(match current_user(app, headers).await? {
         Some(u) if u.did == a.producer_did => Viewer::Producer,
+        Some(u) if u.email == a.cosigner_email => Viewer::Cosigner(a.invite_token.clone()),
         _ => Viewer::Other,
     })
 }
 
-async fn agreement_page(
+async fn agreement_view(
     State(app): State<App>,
     headers: HeaderMap,
     UrlPath(id): UrlPath<String>,
     Query(q): Query<InviteQuery>,
-) -> AppResult<Html<String>> {
+) -> AppResult<Json<Value>> {
     let a = load(&app, &id).await?;
-    let who = viewer(&app, &headers, &a, q.invite.as_deref()).await?;
-    if matches!(who, Viewer::Other) {
-        return Err(forbidden("only the producer and the person giving consent can open this agreement"));
-    }
-
-    // The wallet shows the image straight from this URL.
-    let asset_meta = json!({ "name": a.asset_name, "hash": a.asset_hash, "thumbnail": format!("{CONSENT_SITE}/a/{}/asset", a.id) });
-    let summary = format!(
-        r#"<div class="row"><span class="muted">Between {} and {}</span>{}</div>
-<figure class="asset large"><img src="/a/{id}/asset" alt="" /><figcaption class="mono muted">{} · sha256 {}</figcaption></figure>
-<h2>Public terms</h2>{}
-<h2>Private agreement</h2><pre class="agreement">{}</pre>
-<p class="muted">The file carries only a salted hash of this text.</p>
-<details class="card"><summary>Credential</summary><pre class="agreement">{}</pre></details>"#,
-        esc(&a.producer_email),
-        esc(&a.cosigner_email),
-        stage_badge(&a),
-        esc(&a.asset_name),
-        esc(&a.asset_hash),
-        terms_html(&a.public_terms()),
-        esc(&a.agreement_text),
-        esc(serde_json::to_string_pretty(&a.credential_with_proofs()).unwrap_or_default()),
-        id = esc(&a.id),
-    );
-
-    // Checks 2 and 3 refuse these steps; say so before anyone opens their wallet.
+    let (role, invite) = match viewer(&app, &headers, &a, q.invite.as_deref()).await? {
+        Viewer::Producer => ("producer", None),
+        Viewer::Cosigner(t) => ("cosigner", Some(t)),
+        Viewer::Other => return Err(forbidden("only the producer and the person giving consent can open this agreement")),
+    };
+    // Checks 2 and 3 refuse the next step; say so before anyone opens their wallet.
     // A registry outage doesn't block the page, since the steps check again.
-    let blocked = match (&who, a.stage) {
-        (Viewer::Producer, Stage::AwaitingProducer) => signing_refusal(&app, &a).await.ok().flatten().map(|reason| {
-            format!(
-                r#"<p class="notice warn">You aren't authorized to issue this credential in the trust registry ({}), so it can't be signed. <a href="{}">Request access</a>.</p>"#,
-                esc(&reason),
-                esc(request_access_url())
-            )
-        }),
-        (Viewer::Producer | Viewer::Cosigner(_), Stage::AwaitingCosigner) => issue_refusal(&app, &a.producer_did, industry_type(&a.unsecured()), None)
-            .await
-            .ok()
-            .flatten()
-            .map(|reason| {
-                format!(
-                    r#"<p class="notice warn">{} is no longer authorized to issue this credential in the trust registry ({}), so consent can't be given and no file will be written.</p>"#,
-                    esc(&a.producer_email),
-                    esc(&reason)
-                )
-            }),
+    let blocked = match (role, a.stage) {
+        ("producer", Stage::AwaitingProducer) => signing_refusal(&app, &a).await.ok().flatten(),
+        (_, Stage::AwaitingCosigner) => issue_refusal(&app, &a.producer_did, industry_type(&a.unsecured()), None).await.ok().flatten(),
         _ => None,
     };
-    let action = match (&who, a.stage) {
-        (Viewer::Producer, Stage::AwaitingProducer) => format!(
-            r#"<div class="card"><p>Sign the consent request with your wallet. Consent-o-tron then emails <strong>{}</strong>.</p>
-<div class="row actions"><button id="sign">Sign with wallet</button></div><p id="status" class="muted"></p></div>
-<script type="module">
-import {{ WalletSession, postJson }} from "/static/wallet-client.js";
-const credential = {credential}, asset = {asset}, agreementText = {text};
-const status = document.getElementById("status");
-document.getElementById("sign").onclick = async () => {{
-  const wallet = new WalletSession();
-  try {{
-    await wallet.open();
-    status.textContent = "Approve in your wallet…";
-    const {{ proof }} = await wallet.request("credential:sign", {{ credential, role: "issuer", asset, agreementText, counterparty: {counterparty} }});
-    await postJson("/api/a/{id}/producer-proof", {{ proof }});
-    wallet.close();
-    location.reload();
-  }} catch (err) {{ status.textContent = err.message; wallet.close(); }}
-}};
-</script>"#,
-            esc(&a.cosigner_email),
-            credential = script_json(&a.unsecured()),
-            asset = script_json(&asset_meta),
-            text = script_json(&a.agreement_text),
-            counterparty = script_json(&a.cosigner_email),
-            id = esc(&a.id),
-        ),
-        (Viewer::Producer, Stage::AwaitingCosigner) => format!(
-            r#"<p class="notice">Sent to {}. The file is written once they consent.</p>"#,
-            esc(&a.cosigner_email)
-        ),
-        (Viewer::Cosigner(invite), Stage::AwaitingCosigner) => format!(
-            r#"<div class="card"><p><strong>{}</strong> asks for your consent on the terms below.</p>
-<p class="muted">Your wallet signs twice: once to consent, and once to attach your identity to the finished file.</p>
-<div class="row actions"><button id="consent">Consent with wallet</button></div><p id="status" class="muted"></p></div>
-<script type="module">
-import {{ WalletSession, postJson }} from "/static/wallet-client.js";
-const credential = {credential}, asset = {asset}, agreementText = {text}, invite = {invite};
-const status = document.getElementById("status");
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-document.getElementById("consent").onclick = async () => {{
-  const wallet = new WalletSession();
-  try {{
-    await wallet.open();
-    const {{ challenge }} = await (await fetch("/api/challenge")).json();
-    status.textContent = "Choose your identity in the wallet…";
-    const who = await wallet.request("connect", {{ challenge }});
-    await postJson("/api/a/{id}/cosigner", {{ invite, challenge, ...who }});
-    status.textContent = "Review and consent in your wallet…";
-    const {{ proof }} = await wallet.request("credential:sign", {{ credential, role: "participant", asset, agreementText, counterparty: {counterparty} }});
-    await postJson("/api/a/{id}/participant-proof", {{ invite, proof }});
-    status.textContent = "Writing the file…";
-    for (;;) {{
-      const s = await (await fetch("/api/a/{id}/status?invite=" + encodeURIComponent(invite))).json();
-      if (s.identityRequest) {{
-        status.textContent = "Attach your identity in the wallet…";
-        const {{ signature }} = await wallet.request("identity:sign", {{ ...s.identityRequest, asset }});
-        await postJson("/api/a/{id}/identity-signature", {{ invite, signature }});
-        status.textContent = "Writing the file…";
-      }}
-      if (s.stage === "signed") break;
-      if (s.stage === "failed") throw new Error(s.error || "authoring failed");
-      await sleep(600);
-    }}
-    wallet.close();
-    location.reload();
-  }} catch (err) {{ status.textContent = err.message; wallet.close(); }}
-}};
-</script>"#,
-            esc(&a.producer_email),
-            credential = script_json(&a.unsecured()),
-            asset = script_json(&asset_meta),
-            text = script_json(&a.agreement_text),
-            invite = script_json(invite),
-            counterparty = script_json(&a.producer_email),
-            id = esc(&a.id),
-        ),
-        (_, Stage::Authoring) => r#"<p class="notice">Writing the file…</p>"#.into(),
-        (_, Stage::Failed) => format!(r#"<p class="notice warn">Authoring failed: {}</p>"#, esc(a.error.as_deref().unwrap_or("unknown error"))),
-        (_, Stage::Signed) => {
-            let invite_q = match &who {
-                Viewer::Cosigner(t) => format!("?invite={}", esc(t)),
-                _ => String::new(),
-            };
-            let withdraw = match (&who, a.revoked) {
-                (Viewer::Cosigner(t), false) => format!(
-                    r#"<form method="post" action="/a/{id}/withdraw" onsubmit="return confirm('Withdraw your consent? The file stays signed, but verifiers will see consent as withdrawn.')">
-<input type="hidden" name="invite" value="{}" /><button class="secondary danger">Withdraw consent</button></form>"#,
-                    esc(t),
-                    id = esc(&a.id)
-                ),
-                _ => String::new(),
-            };
-            format!(
-                r#"<div class="card"><p>The file is signed by Consent-o-tron and carries the consent credential and {}'s identity assertion.</p>
-<div class="row actions">{withdraw}<a class="button secondary" href="/a/{id}/verify{invite_q}">Verify</a><a class="button" href="/a/{id}/signed.jpg" download>Download signed file</a></div></div>"#,
-                esc(&a.cosigner_email),
-                id = esc(&a.id),
-            )
-        }
-        _ => String::new(),
-    };
-    let action = blocked.unwrap_or(action);
-    Ok(SITE.page(&a.title, &format!("{action}{summary}")))
+    Ok(Json(json!({
+        "id": a.id,
+        "title": a.title,
+        "templateId": a.template_id,
+        "createdAt": a.created_at,
+        "role": role,
+        "invite": invite,
+        "producerEmail": a.producer_email,
+        "cosignerEmail": a.cosigner_email,
+        "assetName": a.asset_name,
+        "assetHash": a.asset_hash,
+        "walletAsset": a.wallet_asset(),
+        "stage": a.stage,
+        "revoked": a.revoked,
+        "error": a.error,
+        "blocked": blocked,
+        "producerSigned": a.producer_proof.is_some(),
+        "participantSigned": a.participant_proof.is_some(),
+        "publicTerms": a.public_terms(),
+        "agreementText": a.agreement_text,
+        "credential": a.unsecured(),
+        "credentialWithProofs": a.credential_with_proofs(),
+    })))
 }
 
 async fn asset(State(app): State<App>, UrlPath(id): UrlPath<String>) -> AppResult<Response> {
@@ -917,7 +713,7 @@ async fn producer_proof(State(app): State<App>, headers: HeaderMap, UrlPath(id):
             &a.cosigner_email,
             &format!("{} asks for your consent", a.producer_email),
             &format!(
-                "{} asked for your consent: {} for {}. Review the terms and the file before you decide.",
+                "{} asked for your consent on Consent-O-Tron: {} for {}. Review the terms and the file before you decide.",
                 a.producer_email, a.title, a.asset_name
             ),
             &format!("{CONSENT_SITE}/a/{id}?invite={}", a.invite_token),
@@ -1038,17 +834,17 @@ async fn identity_signature(State(app): State<App>, UrlPath(id): UrlPath<String>
 // ------------------------------------------------------------------ withdrawal + status list
 
 #[derive(Deserialize)]
-struct WithdrawForm {
+struct WithdrawBody {
     invite: String,
 }
 
-async fn withdraw(State(app): State<App>, UrlPath(id): UrlPath<String>, axum::Form(form): axum::Form<WithdrawForm>) -> AppResult<Redirect> {
+async fn withdraw(State(app): State<App>, UrlPath(id): UrlPath<String>, Json(body): Json<WithdrawBody>) -> AppResult<Json<Value>> {
     let a = load(&app, &id).await?;
-    if form.invite != a.invite_token {
+    if body.invite != a.invite_token {
         return Err(forbidden("only the person who consented can withdraw"));
     }
     set(&app, &id, doc! { "revoked": true }).await?;
-    Ok(Redirect::to(&format!("/a/{id}/verify?invite={}", a.invite_token)))
+    Ok(Json(json!({ "ok": true })))
 }
 
 fn status_list_url() -> String {
@@ -1110,15 +906,6 @@ fn request_access_url() -> String {
     format!("{}/request", REGISTRY_URL.get())
 }
 
-fn not_authorized_html(credential_type: &str, reason: &str) -> String {
-    format!(
-        r#"<p class="notice warn">You aren't authorized to issue <strong>{}</strong> in the trust registry ({}). <a href="{}">Request access</a>; once an administrator approves it, you can create this agreement.</p>"#,
-        esc(credential_type),
-        esc(reason),
-        esc(request_access_url())
-    )
-}
-
 /// Each template, with the registry's refusal if this user may not issue it.
 async fn template_permissions<'a>(app: &'a App, did: &str) -> AppResult<Vec<(&'a Template, Option<String>)>> {
     let mut out = Vec::new();
@@ -1171,99 +958,23 @@ fn trqp_client(http: reqwest::Client) -> TrqpQuery {
     })
 }
 
-fn report_html(report: &Report) -> String {
-    let creds: String = report
-        .credentials
-        .iter()
-        .map(|c| {
-            let outcomes: String = c
-                .outcomes
-                .iter()
-                .map(|o| {
-                    format!(
-                        r#"<li><span class="{}">{}</span><div><div class="code">{}</div><div class="muted">{}</div></div></li>"#,
-                        if o.pass { "pass" } else { "fail" },
-                        if o.pass { "✓" } else { "✗" },
-                        esc(&o.code),
-                        esc(&o.explanation)
-                    )
-                })
-                .collect();
-            format!(
-                r#"<article class="card"><div class="row"><strong>Consent credential</strong><span class="badge {}">{}</span></div>
-<div class="muted">Subject {} · signed {}</div><h3>Public terms</h3>{}<h3>Checks</h3><ul class="outcomes">{outcomes}</ul></article>"#,
-                if c.valid { "ok" } else { "fail" },
-                if c.valid { "valid" } else { "not valid" },
-                esc(c.subject.trim_start_matches("mailto:")),
-                esc(&c.valid_from),
-                terms_html(&c.public_terms),
-            )
-        })
-        .collect();
-    let failures: String = report
-        .c2pa_failures
-        .iter()
-        .map(|f| format!(r#"<li class="mono">{} {}</li>"#, esc(&f.code), esc(&f.url)))
-        .collect();
-    format!(
-        r#"<div class="card"><div class="row"><strong>C2PA manifest</strong><span class="badge {}">{}</span></div>{}</div>{creds}"#,
-        if matches!(report.c2pa_state.as_str(), "Trusted" | "Valid") { "ok" } else { "fail" },
-        esc(&report.c2pa_state),
-        if failures.is_empty() { String::new() } else { format!("<ul>{failures}</ul>") }
-    )
-}
-
 async fn verify_agreement(
     State(app): State<App>,
     headers: HeaderMap,
     UrlPath(id): UrlPath<String>,
     Query(q): Query<VerifyQuery>,
-) -> AppResult<Html<String>> {
+) -> AppResult<Json<Value>> {
     let a = load(&app, &id).await?;
-    let who = viewer(&app, &headers, &a, q.invite.as_deref()).await?;
+    let party = !matches!(viewer(&app, &headers, &a, q.invite.as_deref()).await?, Viewer::Other);
     let signed = app.blobs.get(a.signed_key.as_deref().ok_or_else(|| anyhow!("not signed yet"))?).await?;
-    let offline = q.offline.is_some();
-    let party = !matches!(who, Viewer::Other);
-    let agreement = if q.reveal.is_some() && party { serde_json::from_str(&a.private_agreement).ok() } else { None };
-    let inputs = verify_inputs(&app, offline, agreement).await?;
-    let report = verify_asset(&app.root, "image/jpeg", &signed, &inputs)?;
-
-    let base = match &q.invite {
-        Some(t) => format!("/a/{}/verify?invite={}&", esc(&id), esc(t)),
-        None => format!("/a/{}/verify?", esc(&id)),
-    };
-    let reveal = if party {
-        format!(r#"<a class="button secondary" href="{base}{}reveal=1">Reveal private agreement</a>"#, if offline { "offline=1&" } else { "" })
-    } else {
-        String::new()
-    };
-    Ok(SITE.page(
-        "Verify",
-        &format!(
-            r#"<p class="muted">{} · <a href="/a/{id}{back}">back to agreement</a></p>
-<div class="row" style="justify-content:flex-start"><a class="button {on}" href="{base}">Online</a><a class="button {off}" href="{base}offline=1">Offline</a>{reveal}</div>
-<p class="muted">Offline skips the trust registry and the status list, the way a disconnected reader would.</p>{}"#,
-            esc(&a.asset_name),
-            report_html(&report),
-            id = esc(&id),
-            back = q.invite.as_ref().map(|t| format!("?invite={}", esc(t))).unwrap_or_default(),
-            on = if offline { "secondary" } else { "" },
-            off = if offline { "" } else { "secondary" },
-        ),
-    ))
+    let revealed = q.reveal.is_some() && party;
+    let agreement = if revealed { serde_json::from_str(&a.private_agreement).ok() } else { None };
+    let inputs = verify_inputs(&app, q.offline.is_some(), agreement).await?;
+    let report: Report = verify_asset(&app.root, "image/jpeg", &signed, &inputs)?;
+    Ok(Json(json!({ "assetName": a.asset_name, "title": a.title, "party": party, "revealed": revealed, "report": report })))
 }
 
-async fn verify_form() -> Html<String> {
-    SITE.page(
-        "Verify a file",
-        r#"<form class="card" method="post" enctype="multipart/form-data">
-<label>Signed file (JPEG)<input type="file" name="file" accept="image/jpeg" required /></label>
-<label style="font-weight:400"><input type="checkbox" name="offline" style="width:auto" /> Offline (skip trust registry and status list)</label>
-<div class="row actions"><button>Verify</button></div></form>"#,
-    )
-}
-
-async fn verify_upload(State(app): State<App>, mut form: Multipart) -> AppResult<Html<String>> {
+async fn verify_upload(State(app): State<App>, mut form: Multipart) -> AppResult<Json<Report>> {
     let (mut file, mut offline) = (Vec::new(), false);
     while let Some(field) = form.next_field().await? {
         match field.name() {
@@ -1273,13 +984,9 @@ async fn verify_upload(State(app): State<App>, mut form: Multipart) -> AppResult
         }
     }
     let inputs = verify_inputs(&app, offline, None).await?;
-    let body = match verify_asset(&app.root, "image/jpeg", &file, &inputs) {
-        Ok(report) => report_html(&report),
-        Err(e) => format!(r#"<p class="notice warn">{}</p>"#, esc(format!("{e:#}"))),
-    };
-    Ok(SITE.page("Verify a file", &format!(r#"<p><a href="/verify">Verify another</a></p>{body}"#)))
+    Ok(Json(verify_asset(&app.root, "image/jpeg", &file, &inputs)?))
 }
 
-async fn outbox(State(app): State<App>) -> AppResult<Html<String>> {
-    Ok(app.mailer.outbox_page(&SITE).await?)
+async fn outbox(State(app): State<App>) -> AppResult<Json<Value>> {
+    Ok(Json(json!({ "resend": app.mailer.uses_resend(), "emails": app.mailer.list().await? })))
 }

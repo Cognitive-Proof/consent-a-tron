@@ -29,7 +29,13 @@ impl EnvUrl {
 
     pub fn get(&self) -> &str {
         self.value.get_or_init(|| {
-            std::env::var(self.var).map(|v| v.trim().trim_end_matches('/').to_string()).unwrap_or_else(|_| self.default.into())
+            // An empty value (e.g. `CONSENT_SITE_URL=` copied from .env.example)
+            // counts as unset.
+            std::env::var(self.var)
+                .ok()
+                .map(|v| v.trim().trim_end_matches('/').to_string())
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| self.default.into())
         })
     }
 }
@@ -264,13 +270,20 @@ impl Mailer {
         Ok(site.page("Sent emails", &self.outbox_body().await?))
     }
 
-    /// The outbox list without the page around it, for sites with their own layout.
-    pub async fn outbox_body(&self) -> anyhow::Result<String> {
+    /// The latest 50 emails this site sent, newest first.
+    pub async fn list(&self) -> anyhow::Result<Vec<Email>> {
         // Sorted here rather than in the query, so Firestore needs no composite index.
         let mut emails: Vec<Email> = self.outbox.find(doc! { "site": self.site }).await?.try_collect().await?;
         emails.sort_by(|a, b| b.at.cmp(&a.at));
         emails.truncate(50);
-        let items: String = emails
+        Ok(emails)
+    }
+
+    /// The outbox list without the page around it, for sites with their own layout.
+    pub async fn outbox_body(&self) -> anyhow::Result<String> {
+        let items: String = self
+            .list()
+            .await?
             .iter()
             .map(|e| {
                 let badge = match e.delivery.as_str() {

@@ -32,7 +32,7 @@ import { history, identities, type Identity } from "./store";
 // The sites this wallet answers, set at build time (see .env.example).
 const SITES: Record<string, string> = {
   [import.meta.env.VITE_CERT_SITE_URL ?? "http://localhost:4001"]: "Certificate site",
-  [import.meta.env.VITE_CONSENT_SITE_URL ?? "http://localhost:4003"]: "Consent-o-tron",
+  [import.meta.env.VITE_CONSENT_SITE_URL ?? "http://localhost:4003"]: "Consent-O-Tron",
   [import.meta.env.VITE_REGISTRY_URL ?? "http://localhost:4005"]: "Trust Registry",
 };
 const ALLOWED_ORIGINS = new Set(Object.keys(SITES).map((url) => new URL(url).origin));
@@ -320,7 +320,7 @@ async function handle(req: Request, origin: string): Promise<Record<string, unkn
       const ok = await approve(
         origin,
         "Attach your identity to the file",
-        `<p>Consent-o-tron is writing the file. This signs your CAWG identity assertion, which covers your consent.</p>
+        `<p>Consent-O-Tron is writing the file. This signs your CAWG identity assertion, which covers your consent.</p>
          ${assetBlock(req.asset as Record<string, unknown>)}`,
         { approveLabel: "Sign identity" },
       );

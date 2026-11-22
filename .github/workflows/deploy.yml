@@ -43,11 +43,14 @@ jobs:
           cache-dependency-path: |
             wallet/package-lock.json
             crates/cert-site/web/package-lock.json
+            crates/consent-o-tron/web/package-lock.json
             registry/package-lock.json
       - run: npm ci && npm run build
         working-directory: wallet
       - run: npm ci && npm run build
         working-directory: crates/cert-site/web
+      - run: npm ci && npm run build
+        working-directory: crates/consent-o-tron/web
       - run: npm ci && npm run build
         working-directory: registry
 
