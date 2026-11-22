@@ -9,9 +9,11 @@ export type SessionValue = {
   requireLogin: (then?: (u: User) => void) => void;
   /** NotSSL, where people get the certificate their wallet identity needs. */
   certSite: string;
+  /** The trust registry page where producers request permission to issue. */
+  requestAccess: string;
 };
 
-export const Session = createContext<SessionValue>({ user: undefined, setUser: () => {}, requireLogin: () => {}, certSite: "http://localhost:4001" });
+export const Session = createContext<SessionValue>({ user: undefined, setUser: () => {}, requireLogin: () => {}, certSite: "http://localhost:4001", requestAccess: "http://localhost:4005/request" });
 
 export const useSession = () => useContext(Session);
 

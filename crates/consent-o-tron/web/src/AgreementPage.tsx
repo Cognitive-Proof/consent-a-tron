@@ -106,7 +106,7 @@ function ConsentModal({ a, onDone, onClose }: { a: AgreementView; onDone: () => 
 }
 
 export function AgreementPage({ id }: { id: string }) {
-  const { user, requireLogin } = useSession();
+  const { user, requireLogin, requestAccess } = useSession();
   const invite = inviteParam();
   const [a, setA] = useState<AgreementView | null>(null);
   const [error, setError] = useState<ApiError | null>(null);
@@ -173,7 +173,27 @@ export function AgreementPage({ id }: { id: string }) {
   };
 
   let action = null;
-  if (a.role === "producer" && a.stage === "awaiting_producer") {
+  if (a.blocked && a.role === "producer" && a.stage === "awaiting_producer") {
+    action = (
+      <div className="panel panel-bad">
+        <p>
+          You aren't authorized to issue this credential in the trust registry ({a.blocked}), so it can't be signed.
+        </p>
+        <a className="btn btn-primary" href={requestAccess}>
+          Request access
+        </a>
+      </div>
+    );
+  } else if (a.blocked && a.stage === "awaiting_cosigner") {
+    action = (
+      <div className="panel panel-bad">
+        <p>
+          {a.role === "producer" ? "You are" : `${a.producerEmail} is`} no longer authorized to issue this credential in the trust
+          registry ({a.blocked}), so consent can't be given and no file will be written.
+        </p>
+      </div>
+    );
+  } else if (a.role === "producer" && a.stage === "awaiting_producer") {
     action = (
       <div className="panel">
         <p>

@@ -122,10 +122,10 @@ img { max-width: 100%; }
 .tcard { background: var(--white); border: var(--border); border-radius: var(--radius); overflow: hidden; cursor: pointer; display: flex; flex-direction: column; transition: transform .15s, box-shadow .15s; }
 .tcard:hover { transform: translate(-2px, -2px); box-shadow: 6px 6px 0 var(--ink); }
 .tcard-body { padding: 18px 20px 20px; display: flex; flex-direction: column; gap: 10px; flex: 1; }
-.tcard-tags { display: flex; gap: 6px; }
+.tcard-tags { display: flex; flex-wrap: wrap; gap: 6px; }
 .tcard-foot { margin-top: auto; padding-top: 8px; display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
 .tcard-foot > * { white-space: nowrap; }
-.tag { display: inline-block; font-size: 12px; font-weight: 700; padding: 2px 10px; border-radius: 999px; border: 1.5px solid var(--ink); background: var(--sand-2); }
+.tag { display: inline-block; white-space: nowrap; font-size: 12px; font-weight: 700; padding: 2px 10px; border-radius: 999px; border: 1.5px solid var(--ink); background: var(--sand-2); }
 .tag-red { background: var(--red); color: var(--white); border-color: var(--red-dark); }
 .tag-open { background: var(--green-soft); border-color: var(--green); color: var(--green); }
 .tag-locked { background: var(--amber-soft); border-color: var(--amber); color: var(--amber); }

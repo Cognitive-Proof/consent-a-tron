@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { getTemplates, humanize, shortDate, shortLabel, type Template } from "./api";
+import { getJson, getTemplates, humanize, shortDate, shortLabel, type Permissions, type Template } from "./api";
 import { DEMO, Frame } from "./Chrome";
+import { Modal } from "./Modal";
 import { go, useSession } from "./session";
 import { Wizard } from "./Wizard";
 
@@ -27,7 +28,7 @@ export function Thumb({ t }: { t: Template }) {
   );
 }
 
-function TemplateCard({ t, featured, onOpen }: { t: Template; featured?: boolean; onOpen: () => void }) {
+function TemplateCard({ t, featured, locked, onOpen }: { t: Template; featured?: boolean; locked?: boolean; onOpen: () => void }) {
   return (
     <article className="tcard" onClick={onOpen}>
       <Thumb t={t} />
@@ -35,6 +36,7 @@ function TemplateCard({ t, featured, onOpen }: { t: Template; featured?: boolean
         <div className="tcard-tags">
           {featured && <span className="tag tag-red">Featured</span>}
           <span className="tag">{t.category}</span>
+          {locked && <span className="tag tag-locked">Needs access</span>}
         </div>
         <h3>{t.title}</h3>
         <p className="muted">{t.description}</p>
@@ -54,7 +56,7 @@ function TemplateCard({ t, featured, onOpen }: { t: Template; featured?: boolean
               onOpen();
             }}
           >
-            Use this agreement →
+            {locked ? "Request access →" : "Use this agreement →"}
           </button>
         </div>
       </div>
@@ -63,7 +65,10 @@ function TemplateCard({ t, featured, onOpen }: { t: Template; featured?: boolean
 }
 
 export function Gallery({ wizardFor }: { wizardFor: string | null }) {
-  const { user, requireLogin } = useSession();
+  const { user, requireLogin, requestAccess } = useSession();
+  const [permissions, setPermissions] = useState<Permissions | null>(null);
+  // The template a producer chose without permission to issue it.
+  const [denied, setDenied] = useState<Template | null>(null);
   const [templates, setTemplates] = useState<Template[]>([]);
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState<string | null>(null);
@@ -74,14 +79,22 @@ export function Gallery({ wizardFor }: { wizardFor: string | null }) {
     getTemplates().then(setTemplates);
   }, []);
 
+  // What the trust registry lets this producer issue, asked again whenever they log in.
+  useEffect(() => {
+    setPermissions(null);
+    if (user) getJson<Permissions>("/api/permissions").then(setPermissions, () => {});
+  }, [user]);
+  const refusal = (t: Template) => permissions?.refusals[t.id] ?? null;
+
   // A deep link to /new/{template} needs a login first.
   useEffect(() => {
     if (wizardFor && user === null) requireLogin(() => {});
   }, [wizardFor, user, requireLogin]);
 
   const open = (t: Template) => {
-    if (user) go(`/new/${t.id}`, { scroll: false });
-    else requireLogin(() => go(`/new/${t.id}`, { scroll: false }));
+    if (!user) return requireLogin(() => go(`/new/${t.id}`, { scroll: false }));
+    if (refusal(t)) return setDenied(t);
+    go(`/new/${t.id}`, { scroll: false });
   };
 
   const categories = useMemo(() => [...new Set(templates.map((t) => t.category))].sort(), [templates]);
@@ -102,7 +115,10 @@ export function Gallery({ wizardFor }: { wizardFor: string | null }) {
     );
   }, [templates, query, category, sort]);
 
-  const wizardTemplate = wizardFor && user ? templates.find((t) => t.id === wizardFor) : undefined;
+  // The wizard waits for the registry's answer, so a deep link can't skip it.
+  const linked = wizardFor && user && permissions ? templates.find((t) => t.id === wizardFor) : undefined;
+  const wizardTemplate = linked && !refusal(linked) ? linked : undefined;
+  const deniedTemplate = denied ?? (linked && refusal(linked) ? linked : null);
 
   return (
     <Frame>
@@ -154,7 +170,7 @@ export function Gallery({ wizardFor }: { wizardFor: string | null }) {
               </div>
               <div className="grid">
                 {templates.map((t) => (
-                  <TemplateCard key={t.id} t={t} featured onOpen={() => open(t)} />
+                  <TemplateCard key={t.id} t={t} featured locked={!!refusal(t)} onOpen={() => open(t)} />
                 ))}
               </div>
             </div>
@@ -219,7 +235,7 @@ export function Gallery({ wizardFor }: { wizardFor: string | null }) {
           {shown.length ? (
             <div className="grid">
               {shown.map((t) => (
-                <TemplateCard key={t.id} t={t} onOpen={() => open(t)} />
+                <TemplateCard key={t.id} t={t} locked={!!refusal(t)} onOpen={() => open(t)} />
               ))}
             </div>
           ) : (
@@ -273,6 +289,31 @@ export function Gallery({ wizardFor }: { wizardFor: string | null }) {
       </section>
 
       {wizardTemplate && <Wizard template={wizardTemplate} onClose={() => go("/", { scroll: false })} />}
+      {deniedTemplate && (
+        <Modal
+          title="Request access to issue"
+          onClose={() => {
+            setDenied(null);
+            if (wizardFor) go("/", { scroll: false });
+          }}
+        >
+          <div className="wstep center">
+            <img src="/mark.png" width={84} height={84} alt="" />
+            <h3>You can't issue this agreement yet</h3>
+            <p className="muted">
+              To ask someone for consent with <strong>{deniedTemplate.title}</strong>, the trust registry has to authorize you to issue{" "}
+              <code>{deniedTemplate.credentialType}</code> ({refusal(deniedTemplate)}). Request access there; once an administrator
+              approves it, you can use this agreement.
+            </p>
+          </div>
+          <div className="wizard-actions">
+            <span className="spacer" />
+            <a className="btn btn-primary" href={requestAccess}>
+              Request access
+            </a>
+          </div>
+        </Modal>
+      )}
     </Frame>
   );
 }

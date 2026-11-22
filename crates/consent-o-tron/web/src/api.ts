@@ -19,6 +19,7 @@ export type Template = {
   public: Field[];
   private: Field[];
   agreement: string;
+  credentialType: string;
 };
 
 export type Stage = "awaiting_producer" | "awaiting_cosigner" | "authoring" | "signed" | "failed";
@@ -52,6 +53,8 @@ export type AgreementView = {
   stage: Stage;
   revoked: boolean;
   error: string | null;
+  /** The trust registry's reason the next step would be refused, if it would. */
+  blocked: string | null;
   producerSigned: boolean;
   participantSigned: boolean;
   publicTerms: Record<string, string | string[]>;
@@ -129,6 +132,9 @@ export function shortDate(iso: string): string {
   const d = new Date(iso.length === 10 ? `${iso}T12:00:00Z` : iso);
   return isNaN(+d) ? iso : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 }
+
+/** Template id → null if the producer may issue it, else the trust registry's reason. */
+export type Permissions = { unavailable: boolean; refusals: Record<string, string | null> };
 
 let templates: Promise<Template[]> | null = null;
 

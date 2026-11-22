@@ -27,10 +27,10 @@ function App() {
   // Set while the login dialog is open; called once the person has logged in.
   const [loginThen, setLoginThen] = useState<null | ((u: User) => void)>(null);
 
-  const [certSite, setCertSite] = useState("http://localhost:4001");
+  const [config, setConfig] = useState({ certSite: "http://localhost:4001", requestAccess: "http://localhost:4005/request" });
   useEffect(() => {
     getJson<User | null>("/api/me").then(setUser, () => setUser(null));
-    getJson<{ certSite: string }>("/api/config").then((c) => setCertSite(c.certSite), () => {});
+    getJson<typeof config>("/api/config").then(setConfig, () => {});
   }, []);
 
   const requireLogin = useCallback((then: (u: User) => void = () => {}) => {
@@ -57,7 +57,7 @@ function App() {
   }
 
   return (
-    <Session.Provider value={{ user, setUser, requireLogin, certSite }}>
+    <Session.Provider value={{ user, setUser, requireLogin, ...config }}>
       {page}
       {loginThen && (
         <LoginModal
