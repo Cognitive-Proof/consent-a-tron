@@ -1,7 +1,9 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { ApiError, getJson, postForm, shortDate, type Outcome, type Report } from "./api";
 import { Band, Frame } from "./Chrome";
 import { Terms } from "./AgreementPage";
+
+const C2paView = lazy(() => import("./C2paView"));
 
 const short = (code: string) => code.replace(/^cawg\.consent\.credential\./, "");
 
@@ -76,6 +78,19 @@ export function ReportView({ report }: { report: Report }) {
           </ul>
         )}
       </div>
+      {report.manifest_store.active_manifest && (
+        <div className="card">
+          <div className="card-head">
+            <h2>Content Credentials</h2>
+          </div>
+          <p className="muted small">The file's C2PA manifest and CAWG identity. Use View more to step through the details.</p>
+          <div className="c2pa-view">
+            <Suspense fallback={<p className="muted">Loading…</p>}>
+              <C2paView store={report.manifest_store} />
+            </Suspense>
+          </div>
+        </div>
+      )}
       {report.credentials.map((c) => (
         <div className="card" key={c.id}>
           <div className="card-head">

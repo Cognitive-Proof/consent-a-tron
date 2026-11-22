@@ -1,5 +1,7 @@
 // The JSON API served by consent-o-tron (crates/consent-o-tron/src/main.rs).
 
+import type { RsManifestStore } from "./c2pa";
+
 export type User = { email: string; did: string };
 
 export type Field = {
@@ -67,6 +69,8 @@ export type Outcome = { code: string; pass: boolean; explanation: string };
 
 export type Report = {
   c2pa_state: string;
+  /** The C2PA manifest store as c2pa-rs reads it; see c2pa.ts. */
+  manifest_store: RsManifestStore;
   c2pa_failures: { code: string; url: string }[];
   credentials: {
     id: string;

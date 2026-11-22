@@ -239,7 +239,8 @@ li.withdrawn { color: var(--red-dark); }
 .verify-mode { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin: 18px 0; }
 .reveal { display: flex; gap: 10px; align-items: center; margin-bottom: 18px; font-weight: 600; }
 .reveal input { width: 18px; height: 18px; accent-color: var(--red); }
-.report { display: grid; gap: 18px; margin: 10px 0 28px; }
+.report { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; margin: 10px 0 28px; }
+.report .c2pa-view { overflow-x: auto; }
 .report .card + .card { margin-top: 0; }
 .verdict { display: flex; gap: 18px; align-items: center; border: var(--border); border-radius: var(--radius); padding: 20px 24px; box-shadow: var(--shadow); }
 .verdict h2 { font-size: 24px; }
@@ -253,7 +254,7 @@ li.withdrawn { color: var(--red-dark); }
 .checks { list-style: none; padding: 0; margin: 0; display: grid; gap: 2px; }
 .checks li { display: flex; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }
 .checks li:last-child { border-bottom: 0; }
-.checks li > div { display: grid; gap: 2px; min-width: 0; }
+.checks li > div { display: grid; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
 .checks code { font-size: 11.5px; color: var(--steel); word-break: break-all; }
 .mark-icon { flex-shrink: 0; width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center; font-size: 13px; font-weight: 900; color: var(--white); }
 .checks .pass .mark-icon { background: var(--green); }

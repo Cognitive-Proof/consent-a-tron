@@ -49,6 +49,8 @@ pub struct Report {
     pub c2pa_failures: Vec<C2paFailure>,
     pub credentials: Vec<CredentialReport>,
     pub valid: bool,
+    /// The C2PA manifest store as `Reader::json` gives it, for display.
+    pub manifest_store: Value,
 }
 
 #[derive(Serialize)]
@@ -131,6 +133,7 @@ pub fn verify_asset(root: &std::path::Path, format: &str, asset: &[u8], inputs: 
             .collect(),
         c2pa_state,
         credentials: reports,
+        manifest_store: summary,
     })
 }
 
