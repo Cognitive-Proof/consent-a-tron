@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
-use c2pa::{settings::Settings, Builder, BuilderIntent, Context, DigitalSourceType};
+use c2pa::{settings::Settings, Builder, BuilderIntent, Context};
 use cawg_consent_test::{c2pa_settings_toml, manifest_definition};
 use serde_json::Value;
 
@@ -30,7 +30,7 @@ fn main() -> Result<()> {
     let signer = context.signer()?;
 
     let mut builder = Builder::from_shared_context(&context).with_definition(manifest.to_string().as_str())?;
-    builder.set_intent(BuilderIntent::Create(DigitalSourceType::DigitalCapture));
+    builder.set_intent(BuilderIntent::Edit);
 
     if dest.exists() {
         std::fs::remove_file(&dest)?;

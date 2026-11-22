@@ -29,7 +29,13 @@ impl EnvUrl {
 
     pub fn get(&self) -> &str {
         self.value.get_or_init(|| {
-            std::env::var(self.var).map(|v| v.trim().trim_end_matches('/').to_string()).unwrap_or_else(|_| self.default.into())
+            // An empty value (e.g. `CONSENT_SITE_URL=` copied from .env.example)
+            // counts as unset.
+            std::env::var(self.var)
+                .ok()
+                .map(|v| v.trim().trim_end_matches('/').to_string())
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| self.default.into())
         })
     }
 }
