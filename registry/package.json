@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "@cognitiveproof/cawg-trqp": "^0.17.1",
-    "@cognitiveproof/cawg-trqp-plugin-admin": "file:vendor/cognitiveproof-cawg-trqp-plugin-admin-0.0.0.tgz",
+    "@cognitiveproof/cawg-trqp-plugin-admin": "^0.1.1",
     "express": "^4.21.2",
     "mongodb": "^6.10.0"
   },
