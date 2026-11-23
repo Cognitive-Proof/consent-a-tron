@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useState } from "react";
-import { ApiError, getJson, postForm, shortDate, type Outcome, type Report } from "./api";
+import { ApiError, getJson, postForm, shortDate, showValue, type Outcome, type Report } from "./api";
 import { Band, Frame } from "./Chrome";
 import { Terms } from "./AgreementPage";
 
@@ -27,8 +27,21 @@ function verdict(report: Report): [string, string, string] {
   const has = (code: string) => outcomes.some((o) => short(o.code) === code);
   if (!report.credentials.length) return ["red", "No consent credential", "This file has no CAWG consent credential."];
   if (has("revoked")) return ["red", "Consent withdrawn", "One of the parties has withdrawn it."];
+  const license = report.credentials.find((c) => c.consent_domain === "asset");
+  if (report.valid && license)
+    return [
+      "green",
+      "License verified",
+      `The file carries a valid ${showValue(license.public_terms?.license ?? "license")} license, signed by its rights holder.`,
+    ];
   if (report.valid && has("status_unchecked"))
     return ["amber", "Valid when signed", "Withdrawal status wasn't checked, so this can't say whether consent still stands."];
+  if (report.valid && has("not_withdrawable"))
+    return [
+      "green",
+      "Consent verified",
+      `The file carries valid consent, signed by both parties. It can't be withdrawn${has("issuer_ungoverned") ? ", and no guild vouches for the producer" : ""}.`,
+    ];
   if (report.valid) return ["green", "Consent verified", "The file carries valid consent, signed by both parties, and it hasn't been withdrawn."];
   const failed = outcomes.find((o) => !o.pass);
   return ["red", "Not valid", failed ? (FAILURES[short(failed.code)] ?? failed.explanation) : `The C2PA manifest is ${report.c2pa_state}.`];
@@ -94,11 +107,12 @@ export function ReportView({ report }: { report: Report }) {
       {report.credentials.map((c) => (
         <div className="card" key={c.id}>
           <div className="card-head">
-            <h2>Consent credential</h2>
+            <h2>{c.consent_domain === "asset" ? "License credential" : "Consent credential"}</h2>
             <span className={`pill pill-${c.valid ? "green" : "red"}`}>{c.valid ? "Valid" : "Not valid"}</span>
           </div>
           <p className="muted">
-            Consent from <strong>{c.subject.replace(/^mailto:/, "")}</strong> · signed {shortDate(c.valid_from)}
+            {c.consent_domain === "asset" ? "Licensed by" : "Consent from"} <strong>{c.subject.replace(/^mailto:/, "")}</strong> · signed{" "}
+            {shortDate(c.valid_from)}
           </p>
           <h3>Public terms</h3>
           <Terms terms={c.public_terms} />

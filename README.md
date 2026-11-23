@@ -6,6 +6,8 @@ A test implementation of a CAWG consent assertion (`cawg.consent`) that embeds a
 
 - **Consent is a VC (Data Model 2.0) embedded in `cawg.consent`.** The credential is immutable. Withdrawal is a Bitstring Status List entry, the only mutable part.
 - **Layered schemas.** CAWG defines the minimum, in [schemas/cawg-consent-credential.schema.json](schemas/cawg-consent-credential.schema.json). An industry body extends it with `allOf` and decides which terms are public. The example is [schemas/example-actors-guild-consent-credential.schema.json](schemas/example-actors-guild-consent-credential.schema.json).
+- **A bare CAWG credential is allowed too.** It uses only the base schema: no governance framework or trust registry, no public terms, and no status list, so its consent can't be withdrawn. It may carry `validUntil` so consent lapses on a fixed date. Consent-O-Tron's "Minimal consent" template makes one.
+- **A license needs one signature.** With `consentDomain: asset`, a rights holder licenses their own file: they are issuer and subject, so one proof is enough, and their `cawg.identity` assertion is signed by the same key. Consent-O-Tron's "Creative Commons license" template makes a bare one, with the license and credit as public terms.
 - **Public terms are readable; private terms are committed.** Pay and contract details stay off the file. The credential carries `privateTermsDigest` = SHA-256(salt ‖ JCS(agreement)), so either party can later prove the agreement.
 - **Bound to the file** by the expected C2PA hard-binding hash. For JPEG this is computed before the manifest exists.
 - **Signed by both parties**, as an `eddsa-jcs-2022` proof set:

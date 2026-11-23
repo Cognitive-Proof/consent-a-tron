@@ -65,13 +65,54 @@ export function withdraw(a: AgreementView): Promise<void> {
 
 export type ConsentStep = "connect" | "consent" | "authoring" | "identity" | "done";
 
+/** Waits for the file to be written, signing the identity assertion when it's asked for. */
+async function authorFile(wallet: WalletSession, a: AgreementView, invite: string, onStep: (step: ConsentStep) => void) {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  onStep("authoring");
+  for (;;) {
+    const s = await getJson<{ stage: Stage; error?: string; identityRequest?: object }>(
+      `/api/a/${a.id}/status?invite=${encodeURIComponent(invite)}`,
+    );
+    if (s.identityRequest) {
+      onStep("identity");
+      const { signature } = await wallet.request("identity:sign", { ...s.identityRequest, asset: a.walletAsset });
+      await postJson(`/api/a/${a.id}/identity-signature`, { invite, signature });
+      onStep("authoring");
+    }
+    if (s.stage === "signed") break;
+    if (s.stage === "failed") throw new Error(s.error || "writing the file failed");
+    await sleep(600);
+  }
+  onStep("done");
+}
+
+/**
+ * A license has one signer: the producer connects, signs the credential
+ * about their own file, then signs the CAWG identity assertion.
+ */
+export function licenseFile(a: AgreementView, onStep: (step: ConsentStep) => void = () => {}): Promise<void> {
+  return withWallet(async (wallet) => {
+    onStep("connect");
+    const { challenge } = await getJson<{ challenge: string }>("/api/challenge");
+    const who = await wallet.request("connect", { challenge });
+    onStep("consent");
+    const { proof } = await wallet.request("credential:sign", {
+      credential: a.credential,
+      role: "licensor",
+      asset: a.walletAsset,
+      agreementText: a.agreementText,
+    });
+    const { invite } = await postJson<{ invite: string }>(`/api/a/${a.id}/license`, { challenge, ...who, proof });
+    await authorFile(wallet, a, invite, onStep);
+  });
+}
+
 /**
  * The person consenting connects, signs the credential as participant, and
  * then signs the CAWG identity assertion while the file is written.
  */
 export function consent(a: AgreementView, onStep: (step: ConsentStep) => void): Promise<void> {
   const invite = a.invite!;
-  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   return withWallet(async (wallet) => {
     onStep("connect");
     const { challenge } = await getJson<{ challenge: string }>("/api/challenge");
@@ -86,21 +127,6 @@ export function consent(a: AgreementView, onStep: (step: ConsentStep) => void): 
       counterparty: a.producerEmail,
     });
     await postJson(`/api/a/${a.id}/participant-proof`, { invite, proof });
-    onStep("authoring");
-    for (;;) {
-      const s = await getJson<{ stage: Stage; error?: string; identityRequest?: object }>(
-        `/api/a/${a.id}/status?invite=${encodeURIComponent(invite)}`,
-      );
-      if (s.identityRequest) {
-        onStep("identity");
-        const { signature } = await wallet.request("identity:sign", { ...s.identityRequest, asset: a.walletAsset });
-        await postJson(`/api/a/${a.id}/identity-signature`, { invite, signature });
-        onStep("authoring");
-      }
-      if (s.stage === "signed") break;
-      if (s.stage === "failed") throw new Error(s.error || "writing the file failed");
-      await sleep(600);
-    }
-    onStep("done");
+    await authorFile(wallet, a, invite, onStep);
   });
 }

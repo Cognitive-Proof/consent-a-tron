@@ -7,6 +7,12 @@
 //!   private-agreement.json  the private terms and salt; held by the parties, never embedded
 //!   status-list.json        mock Bitstring Status List credential (all active)
 //!   trqp-registry.json      mock TRQP registry authorizing the requester
+//!
+//! MINT_BARE=1 mints a bare CAWG credential instead: no guild type or
+//! terms, no governance framework and no status list entry, so it can't
+//! be withdrawn. MINT_VALID_UNTIL sets an expiry. MINT_LICENSE=1 mints a
+//! bare Creative Commons license: the participant licenses their own file,
+//! as both issuer and subject, with one signature.
 
 use std::path::{Path, PathBuf};
 
@@ -30,7 +36,9 @@ fn main() -> Result<()> {
     std::fs::create_dir_all(&out)?;
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
 
-    let requester = load_ed25519(&root.join("pki/requester.key"))?;
+    let license = std::env::var_os("MINT_LICENSE").is_some();
+    // A license has one party: the participant issues it about their own file.
+    let requester = load_ed25519(&root.join(if license { "pki/participant.key" } else { "pki/requester.key" }))?;
     // MINT_PARTICIPANT_KEY lets the test cases mint for someone other than
     // the identity assertion signer.
     let participant_key = std::env::var_os("MINT_PARTICIPANT_KEY")
@@ -55,31 +63,44 @@ fn main() -> Result<()> {
     });
     let created = now();
 
+    let bare = license || std::env::var_os("MINT_BARE").is_some();
+    let valid_until = std::env::var("MINT_VALID_UNTIL").ok();
     let mut credential = build_credential(&CredentialParams {
         issuer_did: &requester_did,
         subject_id: &participant_did,
         asset_hash_b64: &asset_hash,
-        credential_type: CREDENTIAL_TYPE,
-        industry_schema_id: GUILD_SCHEMA_ID,
-        status_list_url: STATUS_LIST_URL,
-        status_index: STATUS_INDEX,
-        governance_framework: GOVERNANCE_FRAMEWORK,
-        trust_registry: TRUST_REGISTRY,
-        consent: json!({
-            "aspects": ["image", "likeness"],
-            "permittedUses": ["editorial", "promotional"],
-            "aiTraining": "notAllowed",
-            "digitalReplica": "notAllowed",
-            "territory": "WORLD"
+        consent_domain: if license { "asset" } else { "identity" },
+        consent: if license {
+            Some(json!({ "license": "CC-BY-4.0", "attribution": "Alex Participant" }))
+        } else if bare {
+            None
+        } else {
+            Some(json!({
+                "aspects": ["image", "likeness"],
+                "permittedUses": ["editorial", "promotional"],
+                "aiTraining": "notAllowed",
+                "digitalReplica": "notAllowed",
+                "territory": "WORLD"
+            }))
+        },
+        industry: (!bare).then_some(Industry {
+            credential_type: CREDENTIAL_TYPE,
+            schema_id: GUILD_SCHEMA_ID,
+            governance_framework: GOVERNANCE_FRAMEWORK,
+            trust_registry: TRUST_REGISTRY,
         }),
+        status: (!bare).then_some(StatusEntry { list_url: STATUS_LIST_URL, index: STATUS_INDEX }),
         agreement: &agreement,
         salt: &salt,
         valid_from: &created,
+        valid_until: valid_until.as_deref(),
     })?;
 
     // Proof set: the requester signs as issuer, then the participant cosigns.
     add_proof(&mut credential, &requester, &created)?;
-    add_proof(&mut credential, &participant, &created)?;
+    if !license {
+        add_proof(&mut credential, &participant, &created)?;
+    }
 
     let errors = validate_schema(&root.join("schemas"), &credential)?;
     if !errors.is_empty() {

@@ -65,6 +65,8 @@ pub struct CredentialReport {
     pub issuer: String,
     pub subject: String,
     pub valid_from: String,
+    /// `identity` (consent to use a person) or `asset` (a rights holder's license).
+    pub consent_domain: String,
     pub public_terms: Value,
     pub outcomes: Vec<Outcome>,
     pub valid: bool,
@@ -115,6 +117,7 @@ pub fn verify_asset(root: &std::path::Path, format: &str, asset: &[u8], inputs: 
             issuer: str_of(&credential["issuer"]),
             subject: str_of(&credential["credentialSubject"]["id"]),
             valid_from: str_of(&credential["validFrom"]),
+            consent_domain: str_of(&credential["credentialSubject"]["consentDomain"]),
             public_terms: credential["credentialSubject"]["consent"].clone(),
             valid: outcomes.iter().all(|o| o.pass),
             outcomes,
@@ -151,7 +154,7 @@ fn check_credential(
     // Schema (CAWG base + industry extension).
     let errors = validate_schema(&root.join("schemas"), credential)?;
     out.push(if errors.is_empty() {
-        outcome("schema_valid", true, "matches CAWG base and guild schemas")
+        outcome("schema_valid", true, if names_guild_schema(credential) { "matches CAWG base and guild schemas" } else { "matches the CAWG base schema" })
     } else {
         outcome("schema_invalid", false, errors.join("; "))
     });
@@ -197,8 +200,13 @@ fn check_credential(
     match matched {
         Some(id) => {
             let key = id.signer.as_ref().map(|c| c.ed25519_key).unwrap_or_default();
+            let issuer_is_participant = resolve_did_key(issuer).is_ok_and(|k| k.to_bytes() == key);
             out.push(if proof_keys.contains(&key) {
-                outcome("participant_proof_present", true, format!("participant cosigned with the key that signed {}", id.label))
+                if issuer_is_participant {
+                    outcome("participant_proof_present", true, format!("issuer and participant are one party: signed with the key that signed {}", id.label))
+                } else {
+                    outcome("participant_proof_present", true, format!("participant cosigned with the key that signed {}", id.label))
+                }
             } else {
                 outcome("participant_proof_missing", false, format!("no valid proof by the {} signer's key", id.label))
             });
@@ -226,11 +234,17 @@ fn check_credential(
         }
     }
 
-    out.push(match &inputs.trqp {
-        Some(trqp) => check_issuer(trqp, inputs.trusted_authority.as_deref(), credential),
-        None => outcome("issuer_unchecked", true, "offline: TRQP registry not queried"),
+    // A bare credential names no governance framework, so there is no
+    // registry to ask: the issuer is known only by its signature.
+    out.push(match (&inputs.trqp, governed_type(credential)) {
+        (_, None) => outcome("issuer_ungoverned", true, format!("no governance framework: {issuer} is known only by its signature")),
+        (Some(trqp), Some(_)) => check_issuer(trqp, inputs.trusted_authority.as_deref(), credential),
+        (None, Some(_)) => outcome("issuer_unchecked", true, "offline: TRQP registry not queried"),
     });
+    // Without a status entry, consent can't be withdrawn, so there is
+    // nothing to check online or off.
     out.push(match (&inputs.status_list, &inputs.trqp) {
+        _ if credential.get("credentialStatus").is_none() => outcome("not_withdrawable", true, "no status list entry: this consent can't be withdrawn"),
         (Some(list), Some(trqp)) => check_status(list, trqp, credential)?,
         _ => outcome(
             "status_unchecked",
@@ -299,6 +313,12 @@ fn check_agreement(revealed: &Value, credential: &Value) -> Result<Outcome> {
     } else {
         outcome("private_terms_mismatch", false, "revealed agreement does not match privateTermsDigest")
     })
+}
+
+/// The credential type to ask the trust registry about, or None for a bare
+/// credential that names no governance framework.
+pub fn governed_type(credential: &Value) -> Option<&str> {
+    credential.get("governanceFramework").map(|_| industry_type(credential))
 }
 
 pub fn industry_type(credential: &Value) -> &str {

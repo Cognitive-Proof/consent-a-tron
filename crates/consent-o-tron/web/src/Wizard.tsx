@@ -1,11 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
-import { getJson, humanize, postForm, renderAgreement, shortLabel, showValue, type AgreementView, type Field, type Template } from "./api";
+import { getJson, humanize, postForm, renderAgreement, shortDate, shortLabel, showValue, type AgreementView, type Field, type Template } from "./api";
 import { Modal } from "./Modal";
 import { go, useSession } from "./session";
-import { signAsProducer } from "./wallet";
+import { licenseFile, signAsProducer } from "./wallet";
 
 const MAX_UPLOAD = 25 * 1024 * 1024;
-const STEPS = ["File", "Person", "Public terms", "Private terms", "Review", "Sign"];
 
 type Values = Record<string, string | string[]>;
 
@@ -49,6 +48,21 @@ function FieldInput({ f, value, onChange }: { f: Field; value: string | string[]
       </fieldset>
     );
   }
+  // A long list reads better as a dropdown than as a row of buttons.
+  if (f.type === "select" && f.options.length > 4) {
+    return (
+      <label className="field">
+        <span>{f.label}</span>
+        <select value={value as string} onChange={(e) => onChange(e.target.value)}>
+          {f.options.map((o) => (
+            <option key={o} value={o}>
+              {humanize(o)}
+            </option>
+          ))}
+        </select>
+      </label>
+    );
+  }
   if (f.type === "select") {
     return (
       <fieldset className="field">
@@ -83,6 +97,15 @@ export function Wizard({ template: t, onClose }: { template: Template; onClose: 
   const [busy, setBusy] = useState(false);
   const [created, setCreated] = useState<AgreementView | null>(null);
   const [sent, setSent] = useState(false);
+  const [expiry, setExpiry] = useState("");
+  // A template with no public terms or private terms skips that step.
+  const steps = useMemo(
+    () => ["File", ...(t.selfSigned ? [] : ["Person"]), ...(t.public.length || t.expiry ? ["Public terms"] : []), ...(t.private.length ? ["Private terms"] : []), "Review", "Sign"],
+    [t],
+  );
+  const at = steps[step];
+  const withdrawable = t.credentialType !== null;
+  const tomorrow = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
 
   const preview = useMemo(() => (file ? URL.createObjectURL(file) : null), [file]);
   useEffect(() => () => void (preview && URL.revokeObjectURL(preview)), [preview]);
@@ -100,10 +123,11 @@ export function Wizard({ template: t, onClose }: { template: Template; onClose: 
 
   const next = () => {
     setError("");
-    if (step === 0 && !file) return setError("Add the image this consent is for.");
-    if (step === 1 && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim())) return setError("Enter the email of the person giving consent.");
-    if (step === 2 && missing(pub, t.public)) return setError(`Choose at least one option for “${missing(pub, t.public)!.label}”.`);
-    if (step === 3 && missing(priv, t.private)) return setError(`Fill in “${missing(priv, t.private)!.label}”.`);
+    if (at === "File" && !file) return setError("Add the image this consent is for.");
+    if (at === "Person" && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim())) return setError("Enter the email of the person giving consent.");
+    if (at === "Public terms" && missing(pub, t.public)) return setError(`Choose at least one option for “${missing(pub, t.public)!.label}”.`);
+    if (at === "Public terms" && expiry && expiry < tomorrow) return setError("Choose an expiry date after today.");
+    if (at === "Private terms" && missing(priv, t.private)) return setError(`Fill in “${missing(priv, t.private)!.label}”.`);
     setStep(step + 1);
   };
 
@@ -114,13 +138,14 @@ export function Wizard({ template: t, onClose }: { template: Template; onClose: 
       const form = new FormData();
       form.append("template", t.id);
       form.append("asset", file!);
-      form.append("cosigner_email", email.trim());
+      if (!t.selfSigned) form.append("cosigner_email", email.trim());
+      if (expiry) form.append("valid_until", expiry);
       for (const [prefix, values] of [["public.", pub], ["private.", priv]] as const) {
         for (const [k, v] of Object.entries(values)) for (const x of Array.isArray(v) ? v : [v]) form.append(prefix + k, x);
       }
       const { id } = await postForm<{ id: string }>("/api/agreements", form);
       setCreated(await getJson<AgreementView>(`/api/a/${id}`));
-      setStep(5);
+      setStep(steps.indexOf("Sign"));
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -132,7 +157,7 @@ export function Wizard({ template: t, onClose }: { template: Template; onClose: 
     setBusy(true);
     setError("");
     try {
-      await signAsProducer(created!);
+      await (t.selfSigned ? licenseFile(created!) : signAsProducer(created!));
       setSent(true);
     } catch (e) {
       setError((e as Error).message);
@@ -147,9 +172,9 @@ export function Wizard({ template: t, onClose }: { template: Template; onClose: 
 
   return (
     <Modal title={t.title} onClose={busy ? undefined : close} wide>
-      <Stepper steps={STEPS} current={sent ? STEPS.length : step} />
+      <Stepper steps={steps} current={sent ? steps.length : step} />
 
-      {step === 0 && (
+      {at === "File" && (
         <div className="wstep">
           <h3>Which file is this consent for?</h3>
           <p className="muted">The credential is bound to this exact image. Any change to it breaks the binding.</p>
@@ -185,7 +210,7 @@ export function Wizard({ template: t, onClose }: { template: Template; onClose: 
         </div>
       )}
 
-      {step === 1 && (
+      {at === "Person" && (
         <div className="wstep">
           <h3>Who is giving consent?</h3>
           <label className="field">
@@ -199,19 +224,37 @@ export function Wizard({ template: t, onClose }: { template: Template; onClose: 
         </div>
       )}
 
-      {step === 2 && (
+      {at === "Public terms" && (
         <div className="wstep">
           <h3>Public terms</h3>
           <p className="badge-line">
             <span className="tag tag-open">Visible in the file</span> Anyone who has the file can read these.
           </p>
+          {t.public.length === 0 && <p className="muted">This agreement has no public terms. The file says only that consent was given.</p>}
           {t.public.map((f) => (
             <FieldInput key={f.name} f={f} value={pub[f.name]} onChange={(v) => setPub({ ...pub, [f.name]: v })} />
           ))}
+          {t.expiry && (
+            <label className="field">
+              <span>Consent expires (optional)</span>
+              <input type="date" min={tomorrow} value={expiry} onChange={(e) => setExpiry(e.target.value)} />
+            </label>
+          )}
+          {t.selfSigned && (
+            <p className="note">
+              Only you sign. Creative Commons licenses can't be revoked: once the file is out, anyone may use it on these terms.
+            </p>
+          )}
+          {!withdrawable && !t.selfSigned && (
+            <p className="note">
+              This consent can't be withdrawn. Once you both sign, it lasts until the expiry date, or with no end date if you leave it
+              empty.
+            </p>
+          )}
         </div>
       )}
 
-      {step === 3 && (
+      {at === "Private terms" && (
         <div className="wstep">
           <h3>Private terms</h3>
           <p className="badge-line">
@@ -224,23 +267,35 @@ export function Wizard({ template: t, onClose }: { template: Template; onClose: 
         </div>
       )}
 
-      {step === 4 && (
+      {at === "Review" && (
         <div className="wstep">
           <h3>Review the agreement</h3>
           <div className="review">
             <div className="review-side">
               {preview && <img className="review-img" src={preview} alt="" />}
               <dl className="terms">
-                <div>
-                  <dt>Person consenting</dt>
-                  <dd>{email.trim()}</dd>
-                </div>
+                {!t.selfSigned && (
+                  <div>
+                    <dt>Person consenting</dt>
+                    <dd>{email.trim()}</dd>
+                  </div>
+                )}
                 {t.public.map((f) => (
                   <div key={f.name}>
                     <dt>{shortLabel(f.label)}</dt>
                     <dd>{showValue(pub[f.name])}</dd>
                   </div>
                 ))}
+                {t.expiry && (
+                  <div>
+                    <dt>Expires</dt>
+                    <dd>{expiry ? shortDate(expiry) : "No end date"}</dd>
+                  </div>
+                )}
+                <div>
+                  <dt>Withdrawal</dt>
+                  <dd>{withdrawable ? "Either of you can withdraw" : t.selfSigned ? "Can't be revoked" : "Can't be withdrawn"}</dd>
+                </div>
               </dl>
             </div>
             <pre className="agreement-text">{text}</pre>
@@ -248,45 +303,65 @@ export function Wizard({ template: t, onClose }: { template: Template; onClose: 
         </div>
       )}
 
-      {step === 5 && created && !sent && (
+      {at === "Sign" && created && !sent && (
         <div className="wstep center">
           <img src="/mark.png" width={84} height={84} alt="" />
-          <h3>Sign the consent request</h3>
-          <p className="muted">
-            Your wallet signs the credential as its issuer. Consent-O-Tron then emails <strong>{created.cosignerEmail}</strong> a link to
-            review and consent.
-          </p>
+          {t.selfSigned ? (
+            <>
+              <h3>Sign the license</h3>
+              <p className="muted">
+                Your wallet signs the license, then attaches your identity to the file while Consent-O-Tron writes it.
+              </p>
+            </>
+          ) : (
+            <>
+              <h3>Sign the consent request</h3>
+              <p className="muted">
+                Your wallet signs the credential as its issuer. Consent-O-Tron then emails <strong>{created.cosignerEmail}</strong> a link
+                to review and consent.
+              </p>
+            </>
+          )}
         </div>
       )}
 
       {sent && created && (
         <div className="wstep center">
           <div className="success-badge">✓</div>
-          <h3>Sent to {created.cosignerEmail}</h3>
-          <p className="muted">The signed file is written as soon as they consent. You can follow along on the agreement page.</p>
+          {t.selfSigned ? (
+            <>
+              <h3>Your file is licensed</h3>
+              <p className="muted">The signed file carries your license. Download it from the agreement page.</p>
+            </>
+          ) : (
+            <>
+              <h3>Sent to {created.cosignerEmail}</h3>
+              <p className="muted">The signed file is written as soon as they consent. You can follow along on the agreement page.</p>
+            </>
+          )}
         </div>
       )}
 
       {error && <p className="error">{error}</p>}
 
       <div className="wizard-actions">
-        {step > 0 && step < 5 && (
+        {step > 0 && at !== "Sign" && (
           <button className="btn btn-ghost" disabled={busy} onClick={() => setStep(step - 1)}>
             Back
           </button>
         )}
         <span className="spacer" />
-        {step < 4 && (
+        {step < steps.indexOf("Review") && (
           <button className="btn btn-primary" onClick={next}>
             Continue
           </button>
         )}
-        {step === 4 && (
+        {at === "Review" && (
           <button className="btn btn-primary" disabled={busy} onClick={create}>
             {busy ? "Creating…" : "Create credential"}
           </button>
         )}
-        {step === 5 && !sent && (
+        {at === "Sign" && !sent && (
           <button className="btn btn-primary" disabled={busy} onClick={sign}>
             {busy ? "Approve in your wallet…" : "Sign with wallet"}
           </button>

@@ -21,7 +21,12 @@ export type Template = {
   public: Field[];
   private: Field[];
   agreement: string;
-  credentialType: string;
+  /** The guild credential type; null for a bare CAWG credential, with no trust registry or status list. */
+  credentialType: string | null;
+  /** Offers an optional expiry date. */
+  expiry: boolean;
+  /** One signer: the producer licenses their own file. */
+  selfSigned?: boolean;
 };
 
 export type Stage = "awaiting_producer" | "awaiting_cosigner" | "authoring" | "signed" | "failed";
@@ -54,6 +59,11 @@ export type AgreementView = {
   walletAsset: WalletAsset;
   stage: Stage;
   revoked: boolean;
+  /** False when the credential has no status list entry. */
+  withdrawable: boolean;
+  /** The producer licenses their own file; no one else signs. */
+  selfSigned: boolean;
+  validUntil: string | null;
   /** Which party withdrew, if one did. */
   withdrawnBy: "producer" | "cosigner" | null;
   /** The key this viewer signed the credential with. */
@@ -63,7 +73,7 @@ export type AgreementView = {
   blocked: string | null;
   producerSigned: boolean;
   participantSigned: boolean;
-  publicTerms: Record<string, string | string[]>;
+  publicTerms: Record<string, string | string[]> | null;
   agreementText: string;
   credential: unknown;
   credentialWithProofs: unknown;
@@ -81,7 +91,8 @@ export type Report = {
     issuer: string;
     subject: string;
     valid_from: string;
-    public_terms: Record<string, string | string[]>;
+    consent_domain: string;
+    public_terms: Record<string, string | string[]> | null;
     outcomes: Outcome[];
     valid: boolean;
   }[];
