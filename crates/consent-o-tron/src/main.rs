@@ -38,8 +38,8 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use cawg_consent_test::{
     add_proof, build_credential, build_status_list, did_key, did_of_vm, hard_binding_sha256, load_ed25519_pem, now, pki, resolve_did_key,
     uuid_v4,
-    verify::{industry_type, verify_asset, Inputs, Report, TrqpQuery, TrqpQuestion},
-    verify_cert_chain, verify_proofs, CredentialParams,
+    verify::{governed_type, verify_asset, Inputs, Report, TrqpQuery, TrqpQuestion},
+    verify_cert_chain, verify_proofs, CredentialParams, Industry, StatusEntry,
 };
 use demo_common::{
     mongodb::{
@@ -74,10 +74,20 @@ struct Template {
     public: Vec<Field>,
     private: Vec<Field>,
     agreement: String,
-    #[serde(rename = "credentialType")]
-    credential_type: String,
-    #[serde(rename = "schemaId")]
-    schema_id: String,
+    /// The guild credential type and schema. Without them the template makes
+    /// a bare CAWG credential: no trust registry, no public terms and no
+    /// status list, so its consent can't be withdrawn.
+    #[serde(rename = "credentialType", default)]
+    credential_type: Option<String>,
+    #[serde(rename = "schemaId", default)]
+    schema_id: Option<String>,
+    /// Offers an optional expiry date (validUntil).
+    #[serde(default)]
+    expiry: bool,
+    /// One party: the producer licenses their own file (consentDomain
+    /// `asset`), signing the credential and the identity assertion alone.
+    #[serde(rename = "selfSigned", default)]
+    self_signed: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -125,8 +135,13 @@ struct Agreement {
     participant_proof: Option<String>,
     cosigner_did: Option<String>,
     cosigner_chain_pem: Option<String>,
-    status_index: i64,
+    /// None for consent that can't be withdrawn.
+    #[serde(default)]
+    status_index: Option<i64>,
     revoked: bool,
+    /// The producer licenses their own file: no one else signs.
+    #[serde(default)]
+    self_signed: bool,
     /// The signed withdrawal statement (`Withdrawal` as JSON), once withdrawn.
     #[serde(default)]
     withdrawal: Option<String>,
@@ -270,6 +285,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/a/{id}/producer-proof", post(producer_proof))
         .route("/api/a/{id}/cosigner", post(cosigner_connect))
         .route("/api/a/{id}/participant-proof", post(participant_proof))
+        .route("/api/a/{id}/license", post(license))
         .route("/api/a/{id}/status", get(agreement_status))
         .route("/api/a/{id}/identity-signature", post(identity_signature))
         .route("/api/a/{id}/withdraw", post(withdraw))
@@ -486,17 +502,34 @@ async fn create_agreement(State(app): State<App>, headers: HeaderMap, mut form: 
     // Ask about the exact validFrom the credential will carry (whole seconds),
     // since that's the moment the verifier asks about.
     let valid_from = now();
-    if let Some(reason) = issue_refusal(&app, &user.did, &t.credential_type, Some(&valid_from)).await? {
+    if let Some(reason) = issue_refusal(&app, &user.did, t.credential_type.as_deref(), Some(&valid_from)).await? {
         return Err(forbidden(&format!(
             "you aren't authorized to issue {} in the trust registry ({reason}); request access at {}",
-            t.credential_type,
+            t.credential_type.as_deref().unwrap_or_default(),
             request_access_url()
         )));
     }
     if asset.len() < 4 || asset[..3] != [0xff, 0xd8, 0xff] {
         return Err(anyhow!("please upload a JPEG image").into());
     }
-    let cosigner_email = values.get("cosigner_email").and_then(|v| v.first()).map(|s| s.trim().to_lowercase()).unwrap_or_default();
+    // An optional expiry date: consent lapses at the end of that day (UTC).
+    let valid_until = match values.get("valid_until").and_then(|v| v.first()).map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        Some(_) if !t.expiry => return Err(anyhow!("this template has no expiry date").into()),
+        Some(day) => {
+            let until = format!("{day}T23:59:59Z");
+            if day.len() != 10 || !day.chars().all(|c| c.is_ascii_digit() || c == '-') || until <= valid_from {
+                return Err(anyhow!("choose an expiry date after today").into());
+            }
+            Some(until)
+        }
+        None => None,
+    };
+    // On a license the producer is also the one named in the credential.
+    let cosigner_email = if t.self_signed {
+        user.email.clone()
+    } else {
+        values.get("cosigner_email").and_then(|v| v.first()).map(|s| s.trim().to_lowercase()).unwrap_or_default()
+    };
     if !cosigner_email.contains('@') {
         return Err(anyhow!("enter the email of the person giving consent").into());
     }
@@ -526,23 +559,30 @@ async fn create_agreement(State(app): State<App>, headers: HeaderMap, mut form: 
     let mut salt = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut salt);
     let agreement_doc = json!({ "template": t.id, "terms": private, "text": text, "producer": user.email, "participant": cosigner_email });
-    let index = next_status_index(&app).await?;
     let subject = format!("mailto:{cosigner_email}");
     let asset_hash = hard_binding_sha256(&asset, "jpg")?;
+    // A guild template gets the guild layer and a status list entry; a bare one neither.
+    let authority = registry_authority();
+    let (industry, index) = match (&t.credential_type, &t.schema_id) {
+        (Some(credential_type), Some(schema_id)) => (
+            Some(Industry { credential_type, schema_id, governance_framework: &authority, trust_registry: REGISTRY_URL.get() }),
+            Some(next_status_index(&app).await?),
+        ),
+        _ => (None, None),
+    };
+    let list_url = status_list_url();
     let credential = build_credential(&CredentialParams {
         issuer_did: &user.did,
         subject_id: &subject,
         asset_hash_b64: &asset_hash,
-        credential_type: &t.credential_type,
-        industry_schema_id: &t.schema_id,
-        status_list_url: &status_list_url(),
-        status_index: index,
-        governance_framework: &registry_authority(),
-        trust_registry: REGISTRY_URL.get(),
-        consent: Value::Object(consent),
+        consent_domain: if t.self_signed { "asset" } else { "identity" },
+        consent: (industry.is_some() || !consent.is_empty()).then(|| Value::Object(consent.clone())),
+        industry,
+        status: index.map(|index| StatusEntry { list_url: &list_url, index }),
         agreement: &agreement_doc,
         salt: &salt,
         valid_from: &valid_from,
+        valid_until: valid_until.as_deref(),
     })?;
 
     let id = uuid_v4();
@@ -568,8 +608,9 @@ async fn create_agreement(State(app): State<App>, headers: HeaderMap, mut form: 
             participant_proof: None,
             cosigner_did: None,
             cosigner_chain_pem: None,
-            status_index: index as i64,
+            status_index: index.map(|i| i as i64),
             revoked: false,
+            self_signed: t.self_signed,
             withdrawal: None,
             stage: Stage::AwaitingProducer,
             error: None,
@@ -632,7 +673,7 @@ async fn agreement_view(
     // A registry outage doesn't block the page, since the steps check again.
     let blocked = match (role, a.stage) {
         ("producer", Stage::AwaitingProducer) => signing_refusal(&app, &a).await.ok().flatten(),
-        (_, Stage::AwaitingCosigner) => issue_refusal(&app, &a.producer_did, industry_type(&a.unsecured()), None).await.ok().flatten(),
+        (_, Stage::AwaitingCosigner) => issue_refusal(&app, &a.producer_did, governed_type(&a.unsecured()), None).await.ok().flatten(),
         _ => None,
     };
     Ok(Json(json!({
@@ -649,6 +690,9 @@ async fn agreement_view(
         "walletAsset": a.wallet_asset(),
         "stage": a.stage,
         "revoked": a.revoked,
+        "withdrawable": a.status_index.is_some(),
+        "selfSigned": a.self_signed,
+        "validUntil": a.unsecured()["validUntil"],
         "withdrawnBy": a.withdrawal.as_deref().and_then(|w| serde_json::from_str::<Withdrawal>(w).ok()).map(|w| w.by),
         // The key this viewer signed the credential with, which a withdrawal must use.
         "signerDid": if role == "producer" { Some(a.producer_did.clone()) } else { a.cosigner_did.clone() },
@@ -700,7 +744,7 @@ fn check_proof(a: &Agreement, proof: &Value) -> AppResult<[u8; 32]> {
 
 async fn producer_proof(State(app): State<App>, headers: HeaderMap, UrlPath(id): UrlPath<String>, Json(body): Json<ProofBody>) -> AppResult<Json<Value>> {
     let a = load(&app, &id).await?;
-    if !matches!(viewer(&app, &headers, &a, None).await?, Viewer::Producer) || a.stage != Stage::AwaitingProducer {
+    if !matches!(viewer(&app, &headers, &a, None).await?, Viewer::Producer) || a.stage != Stage::AwaitingProducer || a.self_signed {
         return Err(forbidden("not waiting for the producer's signature"));
     }
     check_proof(&a, &body.proof)?;
@@ -761,7 +805,7 @@ async fn participant_proof(State(app): State<App>, UrlPath(id): UrlPath<String>,
     }
     // Check 3: the producer may have been revoked since signing. Don't record
     // consent or write a file for a credential its issuer can no longer issue.
-    if let Some(reason) = issue_refusal(&app, &a.producer_did, industry_type(&a.unsecured()), None).await? {
+    if let Some(reason) = issue_refusal(&app, &a.producer_did, governed_type(&a.unsecured()), None).await? {
         return Err(forbidden(&format!(
             "{} is no longer authorized to issue this credential ({reason}), so your consent wasn't recorded and no file was written",
             a.producer_email
@@ -769,6 +813,15 @@ async fn participant_proof(State(app): State<App>, UrlPath(id): UrlPath<String>,
     }
     set(&app, &id, doc! { "participant_proof": body.proof.to_string(), "stage": "authoring" }).await?;
 
+    start_authoring(&app, &id, chain).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// Writes the signed file in the background: c2pa-rs builds the manifest
+/// and waits for the identity signature from the wallet of whoever is named
+/// in the credential (the cosigner, or on a license the producer).
+async fn start_authoring(app: &App, id: &str, chain: String) -> AppResult<()> {
+    let (app, id) = (app.clone(), id.to_string());
     let a = load(&app, &id).await?;
     let credential = a.credential_with_proofs();
     let asset = app.blobs.get(&a.asset_key).await?;
@@ -800,7 +853,40 @@ async fn participant_proof(State(app): State<App>, UrlPath(id): UrlPath<String>,
             eprintln!("saving authoring result for {id}: {e}");
         }
     });
-    Ok(Json(json!({ "ok": true })))
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct LicenseBody {
+    #[serde(flatten)]
+    login: WalletLogin,
+    proof: Value,
+}
+
+/// A license has one signer: the producer connects the identity their
+/// certificate is for, signs the credential, and then signs the identity
+/// assertion while the file is written. Returns the agreement's token, which
+/// the identity signature step uses.
+async fn license(State(app): State<App>, headers: HeaderMap, UrlPath(id): UrlPath<String>, Json(body): Json<LicenseBody>) -> AppResult<Json<Value>> {
+    let a = load(&app, &id).await?;
+    if !a.self_signed || !matches!(viewer(&app, &headers, &a, None).await?, Viewer::Producer) || a.stage != Stage::AwaitingProducer {
+        return Err(forbidden("not waiting for the license to be signed"));
+    }
+    let who = check_login(&app, &body.login).await?;
+    if who.did != a.producer_did || who.email != a.cosigner_email {
+        return Err(anyhow!("sign with the identity you created this license with ({})", a.cosigner_email).into());
+    }
+    if check_proof(&a, &body.proof)? != resolve_did_key(&who.did)?.to_bytes() {
+        return Err(anyhow!("the license must be signed by the identity you connected").into());
+    }
+    set(
+        &app,
+        &id,
+        doc! { "producer_proof": body.proof.to_string(), "cosigner_did": &who.did, "cosigner_chain_pem": &who.chain_pem, "stage": "authoring" },
+    )
+    .await?;
+    start_authoring(&app, &id, who.chain_pem).await?;
+    Ok(Json(json!({ "invite": a.invite_token })))
 }
 
 async fn agreement_status(State(app): State<App>, UrlPath(id): UrlPath<String>, Query(q): Query<InviteQuery>) -> AppResult<Json<Value>> {
@@ -875,6 +961,9 @@ async fn withdraw(State(app): State<App>, UrlPath(id): UrlPath<String>, Json(bod
     if a.revoked {
         return Err(forbidden("consent has already been withdrawn"));
     }
+    if a.status_index.is_none() {
+        return Err(forbidden("this consent can't be withdrawn: it has no status list entry"));
+    }
     let (by, other) = if body.did == a.producer_did {
         ("producer", &a.cosigner_email)
     } else if a.cosigner_did.as_deref() == Some(body.did.as_str()) {
@@ -908,7 +997,7 @@ fn status_list_url() -> String {
 
 async fn signed_status_list(app: &App) -> AppResult<Value> {
     let revoked: Vec<Agreement> = app.agreements.find(doc! { "revoked": true }).await?.try_collect().await?;
-    let indices: Vec<usize> = revoked.iter().map(|a| a.status_index as usize).collect();
+    let indices: Vec<usize> = revoked.iter().filter_map(|a| a.status_index).map(|i| i as usize).collect();
     let mut list = build_status_list(&status_list_url(), &did_key(&app.service_key.verifying_key()), &indices)?;
     add_proof(&mut list, &app.service_key, &now())?;
     Ok(list)
@@ -924,7 +1013,9 @@ async fn status_list(State(app): State<App>) -> AppResult<Json<Value>> {
 /// `credential_type` at `time` (None: now), or None if it is authorized. It
 /// asks exactly what the verifier asks (verify::check_issuer), so Consent-o-tron
 /// refuses up front what verification would reject later.
-async fn issue_refusal(app: &App, did: &str, credential_type: &str, time: Option<&str>) -> AppResult<Option<String>> {
+async fn issue_refusal(app: &App, did: &str, credential_type: Option<&str>, time: Option<&str>) -> AppResult<Option<String>> {
+    // A bare credential names no governance framework, so no registry decides.
+    let Some(credential_type) = credential_type else { return Ok(None) };
     let mut body = json!({ "entity_id": did, "authority_id": registry_authority(), "action": "issue", "resource": credential_type });
     if let Some(time) = time {
         body["context"] = json!({ "time": time });
@@ -950,7 +1041,7 @@ async fn issue_refusal(app: &App, did: &str, credential_type: &str, time: Option
 /// the verifier will ask about.
 async fn signing_refusal(app: &App, a: &Agreement) -> AppResult<Option<String>> {
     let credential = a.unsecured();
-    let ty = industry_type(&credential);
+    let ty = governed_type(&credential);
     if let Some(reason) = issue_refusal(app, &a.producer_did, ty, credential["validFrom"].as_str()).await? {
         return Ok(Some(reason));
     }
@@ -965,7 +1056,7 @@ fn request_access_url() -> String {
 async fn template_permissions<'a>(app: &'a App, did: &str) -> AppResult<Vec<(&'a Template, Option<String>)>> {
     let mut out = Vec::new();
     for t in app.templates.iter() {
-        out.push((t, issue_refusal(app, did, &t.credential_type, None).await?));
+        out.push((t, issue_refusal(app, did, t.credential_type.as_deref(), None).await?));
     }
     Ok(out)
 }

@@ -1,0 +1,33 @@
+{
+  "id": "creative-commons",
+  "title": "Creative Commons license",
+  "description": "License your own file under Creative Commons. Only you sign, and the license travels inside the file.",
+  "category": "License",
+  "updated": "2026-11-23",
+  "selfSigned": true,
+  "public": [
+    {
+      "name": "license",
+      "label": "License",
+      "type": "select",
+      "options": [
+        "CC-BY-4.0",
+        "CC-BY-SA-4.0",
+        "CC-BY-ND-4.0",
+        "CC-BY-NC-4.0",
+        "CC-BY-NC-SA-4.0",
+        "CC-BY-NC-ND-4.0",
+        "CC0-1.0"
+      ],
+      "default": "CC-BY-4.0"
+    },
+    {
+      "name": "attribution",
+      "label": "Credit as",
+      "type": "text",
+      "default": ""
+    }
+  ],
+  "private": [],
+  "agreement": "CREATIVE COMMONS LICENSE\n\n{{producer}} licenses the attached file under {{license}}, as published by Creative Commons at creativecommons.org/licenses.\n\nCredit as: {{attribution}}.\n\nCreative Commons licenses can't be revoked: anyone who received the file under this license may keep using it on its terms."
+}

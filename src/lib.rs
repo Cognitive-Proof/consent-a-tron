@@ -224,18 +224,26 @@ pub fn trqp_authorized(registry: &Value, entity_id: &str, authority_id: &str, ac
 // ---------------------------------------------------------------- schema
 
 /// Validates a credential against the guild schema, which pulls in the
-/// CAWG base schema through `allOf`.
+/// CAWG base schema through `allOf`, or against the base schema alone when
+/// the credential names no guild schema.
 pub fn validate_schema(schema_dir: &Path, credential: &Value) -> Result<Vec<String>> {
     let read = |name: &str| -> Result<Value> {
         Ok(serde_json::from_str(&std::fs::read_to_string(schema_dir.join(name))?)?)
     };
     let base = read("cawg-consent-credential.schema.json")?;
-    let guild = read("example-actors-guild-consent-credential.schema.json")?;
-    let validator = jsonschema::options()
-        .with_resource(BASE_SCHEMA_ID, jsonschema::Resource::from_contents(base)?)
-        .build(&guild)
-        .map_err(|e| anyhow!("schema: {e}"))?;
+    let validator = if names_guild_schema(credential) {
+        let guild = read("example-actors-guild-consent-credential.schema.json")?;
+        jsonschema::options().with_resource(BASE_SCHEMA_ID, jsonschema::Resource::from_contents(base)?).build(&guild)
+    } else {
+        jsonschema::options().build(&base)
+    }
+    .map_err(|e| anyhow!("schema: {e}"))?;
     Ok(validator.iter_errors(credential).map(|e| format!("{} at {}", e, e.instance_path)).collect())
+}
+
+/// Whether the credential lists the guild schema in `credentialSchema`.
+pub fn names_guild_schema(credential: &Value) -> bool {
+    credential["credentialSchema"].as_array().is_some_and(|s| s.iter().any(|s| s["id"] == GUILD_SCHEMA_ID))
 }
 
 // ---------------------------------------------------------------- credential
@@ -252,50 +260,79 @@ pub struct CredentialParams<'a> {
     /// email their identity certificate attests.
     pub subject_id: &'a str,
     pub asset_hash_b64: &'a str,
-    pub credential_type: &'a str,
-    pub industry_schema_id: &'a str,
-    pub status_list_url: &'a str,
-    pub status_index: usize,
-    /// TRQP `authority_id` of the governance framework issuers are authorized under.
-    pub governance_framework: &'a str,
-    /// Where that framework's trust registry answers TRQP queries.
-    pub trust_registry: &'a str,
-    /// Public terms, as defined by the industry schema.
-    pub consent: Value,
+    /// `identity` for consent to use a person's identity, or `asset` for a
+    /// rights holder licensing their own file.
+    pub consent_domain: &'a str,
+    /// Public terms. An industry schema defines them; a bare credential may
+    /// carry its own, such as a license.
+    pub consent: Option<Value>,
+    /// The industry layer. None makes a bare CAWG credential: base schema
+    /// only, no governance framework.
+    pub industry: Option<Industry<'a>>,
+    /// Where withdrawal is recorded. None makes consent that can't be withdrawn.
+    pub status: Option<StatusEntry<'a>>,
     /// Private agreement; only its salted digest goes in the credential.
     pub agreement: &'a Value,
     pub salt: &'a [u8],
     pub valid_from: &'a str,
+    /// When consent lapses, if it does.
+    pub valid_until: Option<&'a str>,
+}
+
+/// An industry body's extension: its credential type and schema, and the
+/// governance framework issuers are authorized under.
+pub struct Industry<'a> {
+    pub credential_type: &'a str,
+    pub schema_id: &'a str,
+    /// TRQP `authority_id` of the governance framework issuers are authorized under.
+    pub governance_framework: &'a str,
+    /// Where that framework's trust registry answers TRQP queries.
+    pub trust_registry: &'a str,
+}
+
+/// A credential's entry in a Bitstring Status List.
+pub struct StatusEntry<'a> {
+    pub list_url: &'a str,
+    pub index: usize,
 }
 
 /// Builds the unsecured consent credential; proofs are added with [`add_proof`].
 pub fn build_credential(p: &CredentialParams) -> Result<Value> {
-    Ok(json!({
+    let mut credential = json!({
         "@context": ["https://www.w3.org/ns/credentials/v2", "https://cawg.io/consent/v1"],
         "id": format!("urn:uuid:{}", uuid_v4()),
-        "type": ["VerifiableCredential", "CawgConsentCredential", p.credential_type],
+        "type": ["VerifiableCredential", "CawgConsentCredential"],
         "issuer": p.issuer_did,
         "validFrom": p.valid_from,
-        "credentialSchema": [
-            { "id": BASE_SCHEMA_ID, "type": "JsonSchema" },
-            { "id": p.industry_schema_id, "type": "JsonSchema" }
-        ],
-        "credentialStatus": {
-            "id": format!("{}#{}", p.status_list_url, p.status_index),
-            "type": "BitstringStatusListEntry",
-            "statusPurpose": "revocation",
-            "statusListIndex": p.status_index.to_string(),
-            "statusListCredential": p.status_list_url
-        },
-        "governanceFramework": { "id": p.governance_framework, "trustRegistry": p.trust_registry },
+        "credentialSchema": [{ "id": BASE_SCHEMA_ID, "type": "JsonSchema" }],
         "credentialSubject": {
             "id": p.subject_id,
-            "consentDomain": "identity",
+            "consentDomain": p.consent_domain,
             "assetBinding": { "bindingType": "c2pa.hash.data", "alg": "sha256", "hash": p.asset_hash_b64 },
-            "privateTermsDigest": { "alg": "sha256", "digest": private_terms_digest(p.salt, p.agreement)? },
-            "consent": p.consent
+            "privateTermsDigest": { "alg": "sha256", "digest": private_terms_digest(p.salt, p.agreement)? }
         }
-    }))
+    });
+    if let Some(consent) = &p.consent {
+        credential["credentialSubject"]["consent"] = consent.clone();
+    }
+    if let Some(until) = p.valid_until {
+        credential["validUntil"] = until.into();
+    }
+    if let Some(s) = &p.status {
+        credential["credentialStatus"] = json!({
+            "id": format!("{}#{}", s.list_url, s.index),
+            "type": "BitstringStatusListEntry",
+            "statusPurpose": "revocation",
+            "statusListIndex": s.index.to_string(),
+            "statusListCredential": s.list_url
+        });
+    }
+    if let Some(i) = &p.industry {
+        credential["type"].as_array_mut().unwrap().push(i.credential_type.into());
+        credential["credentialSchema"].as_array_mut().unwrap().push(json!({ "id": i.schema_id, "type": "JsonSchema" }));
+        credential["governanceFramework"] = json!({ "id": i.governance_framework, "trustRegistry": i.trust_registry });
+    }
+    Ok(credential)
 }
 
 /// A Bitstring Status List credential, unsigned.

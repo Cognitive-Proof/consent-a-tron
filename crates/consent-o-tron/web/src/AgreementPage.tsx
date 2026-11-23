@@ -4,7 +4,7 @@ import { Band, Frame } from "./Chrome";
 import { Modal } from "./Modal";
 import { StagePill } from "./Agreements";
 import { useSession } from "./session";
-import { consent, signAsProducer, withdraw, type ConsentStep } from "./wallet";
+import { consent, licenseFile, signAsProducer, withdraw, type ConsentStep } from "./wallet";
 
 function inviteParam() {
   return new URLSearchParams(location.search).get("invite");
@@ -12,12 +12,18 @@ function inviteParam() {
 
 /** Created → producer signed → consent given → file signed, then withdrawn if it was. */
 function Timeline({ a }: { a: AgreementView }) {
-  const steps: [string, boolean][] = [
-    ["Created", true],
-    ["Producer signed", a.producerSigned],
-    ["Consent given", a.participantSigned],
-    ["File signed", a.stage === "signed"],
-  ];
+  const steps: [string, boolean][] = a.selfSigned
+    ? [
+        ["Created", true],
+        ["License signed", a.producerSigned],
+        ["File signed", a.stage === "signed"],
+      ]
+    : [
+        ["Created", true],
+        ["Producer signed", a.producerSigned],
+        ["Consent given", a.participantSigned],
+        ["File signed", a.stage === "signed"],
+      ];
   if (a.revoked) steps.push(["Withdrawn", true]);
   const current = a.stage === "failed" ? -1 : steps.findIndex(([, done]) => !done);
   return (
@@ -33,11 +39,12 @@ function Timeline({ a }: { a: AgreementView }) {
 }
 
 /** Public terms, labeled as the templates label their fields. */
-export function Terms({ terms }: { terms: Record<string, string | string[]> }) {
+export function Terms({ terms }: { terms: Record<string, string | string[]> | null }) {
   const [labels, setLabels] = useState<Record<string, string>>({});
   useEffect(() => {
     getTemplates().then((ts) => setLabels(Object.fromEntries(ts.flatMap((t) => t.public.map((f) => [f.name, shortLabel(f.label)])))));
   }, []);
+  if (!terms || !Object.keys(terms).length) return <p className="muted">No public terms. The file says only that consent was given.</p>;
   return (
     <dl className="terms">
       {Object.entries(terms).map(([k, v]) => (
@@ -200,6 +207,15 @@ export function AgreementPage({ id }: { id: string }) {
         </p>
       </div>
     );
+  } else if (a.role === "producer" && a.stage === "awaiting_producer" && a.selfSigned) {
+    action = (
+      <div className="panel">
+        <p>Sign the license with your wallet. It then attaches your identity to the file while Consent-O-Tron writes it.</p>
+        <button className="btn btn-primary" disabled={busy} onClick={() => run(() => licenseFile(a))}>
+          {busy ? "Follow your wallet…" : "Sign license with wallet"}
+        </button>
+      </div>
+    );
   } else if (a.role === "producer" && a.stage === "awaiting_producer") {
     action = (
       <div className="panel">
@@ -247,7 +263,11 @@ export function AgreementPage({ id }: { id: string }) {
         <p>
           {a.revoked
             ? `${withdrawnByText(a)} The file stays signed, but verifiers that check status see the consent as withdrawn.`
-            : `The file is signed by Consent-O-Tron and carries the consent credential and ${a.cosignerEmail}'s identity assertion.`}
+            : a.selfSigned
+              ? `The file is signed by Consent-O-Tron and carries your license and your identity assertion. Creative Commons licenses can't be revoked.`
+              : `The file is signed by Consent-O-Tron and carries the consent credential and ${a.cosignerEmail}'s identity assertion.`}
+          {!a.revoked && !a.withdrawable && !a.selfSigned && " This consent can't be withdrawn."}
+          {!a.revoked && a.validUntil && ` It expires on ${shortDate(a.validUntil)}.`}
         </p>
         <div className="panel-actions">
           <a className="btn btn-primary" href={`/a/${a.id}/signed.jpg`} download>
@@ -256,7 +276,7 @@ export function AgreementPage({ id }: { id: string }) {
           <a className="btn btn-ghost" href={`/a/${a.id}/verify${q}`}>
             Verify
           </a>
-          {!a.revoked && a.signerDid && (
+          {!a.revoked && a.withdrawable && a.signerDid && (
             <button className="btn btn-danger" onClick={() => setWithdrawing(true)}>
               Withdraw consent
             </button>
@@ -279,7 +299,8 @@ export function AgreementPage({ id }: { id: string }) {
         <div className="band-meta">
           <StagePill stage={a.stage} revoked={a.revoked} />
           <span className="muted">
-            {reviewing ? a.title : `Between ${a.producerEmail} and ${a.cosignerEmail}`} · created {shortDate(a.createdAt)}
+            {reviewing ? a.title : a.selfSigned ? `Licensed by ${a.producerEmail}` : `Between ${a.producerEmail} and ${a.cosignerEmail}`} · created{" "}
+            {shortDate(a.createdAt)}
           </span>
         </div>
       </Band>

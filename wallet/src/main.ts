@@ -9,6 +9,7 @@
 //   certificate:request  { challenge, email }            -> { did, publicKey, signature }
 //   certificate:deliver  { certChainPem, email, issuer } -> { did }
 //   credential:sign      { credential, role, asset, counterparty?, agreementText? } -> { proof }
+//                        role: issuer, participant, or licensor (one person licensing their own file)
 //   identity:sign        { toBeSigned, consentHash, asset }          -> { signature }
 //   consent:withdraw     { challenge, credentialId, signer, asset }  -> { did, signature }
 //   registry:request     { challenge, permission, entityId }         -> { did, signature }
@@ -273,27 +274,36 @@ async function handle(req: Request, origin: string): Promise<Record<string, unkn
     case "credential:sign": {
       const credential = req.credential as Record<string, unknown>;
       const subject = (credential.credentialSubject ?? {}) as Record<string, unknown>;
-      const role = req.role === "issuer" ? "issuer" : "participant";
+      const role = req.role === "issuer" || req.role === "licensor" ? req.role : "participant";
       const subjectId = String(subject.id ?? "");
       const fits = (i: Identity) =>
-        role === "issuer"
+        role === "licensor"
+          ? i.did === credential.issuer && !!i.certChainPem
+          : role === "issuer"
           ? i.did === credential.issuer
           : subjectId.startsWith("mailto:")
             ? i.email?.toLowerCase() === subjectId.slice(7).toLowerCase()
             : i.did === subjectId;
+      const terms0 = subject.consent as Record<string, unknown> | undefined;
       const who = await approve(
         origin,
-        role === "issuer" ? "Sign the consent request" : "Give consent",
+        role === "licensor" ? "License your file" : role === "issuer" ? "Sign the consent request" : "Give consent",
         `<p>${
-          role === "issuer"
+          role === "licensor"
+            ? `You license this file under <strong>${h(terms0?.license)}</strong>. Only you sign.`
+            : role === "issuer"
             ? `You are asking <strong>${h(req.counterparty ?? subjectId.replace(/^mailto:/, ""))}</strong> for consent to use this file:`
             : `<strong>${h(req.counterparty ?? short(String(credential.issuer)))}</strong> asks for your consent to use this file:`
         }</p>
          ${assetBlock(req.asset as Record<string, unknown>)}
-         <h3>Public terms</h3>${terms(subject.consent)}
+         ${subject.consent ? `<h3>Public terms</h3>${terms(subject.consent)}` : `<p class="muted">No public terms: the file says only that consent was given.</p>`}
+         ${credential.credentialStatus ? "" : role === "licensor"
+           ? `<p class="warn">Creative Commons licenses can't be revoked once the file is shared.</p>`
+           : `<p class="warn">This consent can't be withdrawn once it's signed.</p>`}
+         ${credential.validUntil ? `<p>Consent expires ${h(credential.validUntil)}.</p>` : ""}
          ${req.agreementText ? `<h3>Private agreement</h3><pre class="agreement">${h(req.agreementText)}</pre>
            <p class="muted">Only a salted hash of the private agreement goes in the file.</p>` : ""}`,
-        { choose: (all) => all.filter(fits), approveLabel: role === "issuer" ? "Sign" : "I consent" },
+        { choose: (all) => all.filter(fits), approveLabel: role === "licensor" ? "Sign license" : role === "issuer" ? "Sign" : "I consent" },
       );
       if (!who) throw new Error("declined");
       if (!fits(who)) throw new Error("this identity is not the one named in the credential");
@@ -302,7 +312,7 @@ async function handle(req: Request, origin: string): Promise<Record<string, unkn
         at: now(),
         origin,
         identityId: who.id,
-        action: role === "issuer" ? "Signed consent request" : "Gave consent",
+        action: role === "licensor" ? "Licensed a file" : role === "issuer" ? "Signed consent request" : "Gave consent",
         summary: String((req.asset as Record<string, unknown>)?.name ?? credential.id),
       });
       return { proof };

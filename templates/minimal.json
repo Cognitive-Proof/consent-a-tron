@@ -1,0 +1,18 @@
+{
+  "id": "minimal",
+  "title": "Minimal consent",
+  "description": "A bare CAWG consent credential: both people sign, with no guild terms and no trust registry. It can't be withdrawn.",
+  "category": "Minimal",
+  "updated": "2026-11-23",
+  "public": [],
+  "private": [
+    {
+      "name": "purpose",
+      "label": "What the file will be used for",
+      "type": "text",
+      "default": "Portfolio and social media"
+    }
+  ],
+  "expiry": true,
+  "agreement": "MINIMAL CONSENT\n\n{{participant}} consents to {{producer}} using the attached file for: {{purpose}}.\n\nThis consent can't be withdrawn. It ends on the expiry date in the credential, if one is set; otherwise it has no end date."
+}

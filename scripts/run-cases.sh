@@ -74,5 +74,34 @@ D=$(case_dir wrong-agreement); cp "$BASE"/*.json "$BASE/signed.jpg" "$D"/
 jq '.agreement.fee.amount = "150.00"' "$BASE/private-agreement.json" > "$D/private-agreement.json"
 expect wrong_agreement   "private_terms_mismatch"        1 "$D/signed.jpg" --agreement "$D/private-agreement.json"
 
+# Bare CAWG credential: no guild terms, trust registry or status list.
+D=$(case_dir bare)
+MINT_BARE=1 "$BIN/mint" fixtures/sample.jpg "$D" >/dev/null
+"$BIN/sign" fixtures/sample.jpg "$D/credential.json" "$D/signed.jpg" >/dev/null
+expect bare              "not_withdrawable"              0 "$D/signed.jpg"
+expect bare_ungoverned   "issuer_ungoverned"             0 "$D/signed.jpg"
+expect bare_offline      "not_withdrawable"              0 "$D/signed.jpg" --offline
+
+# A bare credential past its expiry date.
+D=$(case_dir bare-expired)
+MINT_BARE=1 MINT_VALID_UNTIL=2026-01-01T00:00:00Z "$BIN/mint" fixtures/sample.jpg "$D" >/dev/null
+"$BIN/sign" fixtures/sample.jpg "$D/credential.json" "$D/signed.jpg" >/dev/null
+expect bare_expired      "expired"                       1 "$D/signed.jpg"
+
+# Creative Commons license: one person licenses their own file, as both
+# issuer and subject, with a single signature.
+D=$(case_dir license)
+MINT_LICENSE=1 "$BIN/mint" fixtures/sample.jpg "$D" >/dev/null
+"$BIN/sign" fixtures/sample.jpg "$D/credential.json" "$D/signed.jpg" >/dev/null
+expect license           "credential.valid"              0 "$D/signed.jpg"
+expect license_one_proof "1 eddsa-jcs-2022 proofs"       0 "$D/signed.jpg"
+
+# A license signed by someone other than the identity assertion signer.
+D=$(case_dir license-other-signer)
+MINT_LICENSE=1 "$BIN/mint" fixtures/sample.jpg "$D" >/dev/null
+jq --arg did "$(jq -r .issuer "$BASE/credential.json")" '.issuer = $did' "$D/credential.json" > "$D/c.json" && mv "$D/c.json" "$D/credential.json"
+"$BIN/sign" fixtures/sample.jpg "$D/credential.json" "$D/signed.jpg" >/dev/null
+expect license_forged    "signature_invalid"             1 "$D/signed.jpg"
+
 echo; echo "$pass passed, $fail failed"
 [ "$fail" = 0 ]
