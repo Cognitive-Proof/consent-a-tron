@@ -11,6 +11,8 @@ const CATEGORY_BLURB: Record<string, string> = {
   Editorial: "News, documentary and editorial photography, where a person's image is part of the story.",
   Commercial: "Advertising and campaigns, where a person's name or likeness helps sell something.",
   Performance: "Film, games and recorded performance, including voice and movement, with replica limits.",
+  Minimal: "Both people sign and nothing more: no guild terms, no registry, and consent that can't be withdrawn.",
+  License: "License your own work under Creative Commons. Only you sign, and the license goes in the file.",
 };
 
 /** A paper-style preview of the agreement, tinted per category. */
